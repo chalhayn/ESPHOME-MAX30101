@@ -6,7 +6,7 @@
 
 // Vendored Arduino-style library bundled in third_party/
 #include "MAX30105.h"
-
+PulseOximeter30101 pox_;   // member exists again
 namespace esphome {
 namespace max30101 {
 
