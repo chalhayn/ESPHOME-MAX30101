@@ -5,7 +5,7 @@
 #include "esphome/components/sensor/sensor.h"
 
 // Vendored Arduino-style library bundled in third_party/
-#include "third_party/arduino_max30101/MAX30101_PulseOximeter.h"
+#include "esphome/components/max30101/third_party/arduino_max30101/MAX30101_PulseOximeter.h"
 
 namespace esphome {
 namespace max30101 {
