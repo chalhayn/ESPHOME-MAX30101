@@ -9,7 +9,7 @@
   BSD license, all text above must be included in any redistribution.
  *****************************************************/
 
-#include "MAX30105.h"
+#include "MAX30101_PulseOximeter.h"
 
 // Status Registers
 static const uint8_t MAX30105_INTSTAT1 =		0x00;
