@@ -1,156 +1,49 @@
-/*************************************************** 
- This is a library written for the Maxim MAX30105 Optical Smoke Detector
- It should also work with the MAX30102. However, the MAX30102 does not have a Green LED.
-
- These sensors use I2C to communicate, as well as a single (optional)
- interrupt line that is not currently supported in this driver.
- 
- Written by Peter Jansen and Nathan Seidle (SparkFun)
- BSD license, all text above must be included in any redistribution.
- *****************************************************/
-
 #pragma once
+#include "esphome/core/component.h"
+#include "esphome/core/log.h"
+#include "esphome/components/sensor/sensor.h"
+#include <MAX30105.h>  // SparkFun MAX3010x library
 
-#if (ARDUINO >= 100)
- #include "Arduino.h"
-#else
- #include "WProgram.h"
-#endif
+namespace esphome {
+namespace max30101 {
 
-#include <Wire.h>
+class Max30101Component : public PollingComponent {
+ public:
+  // Constructor: poll every 200ms by default
+  Max30101Component() : PollingComponent(200) {}
 
-#define MAX30105_ADDRESS          0x57 //7-bit I2C Address
-//Note that MAX30102 has the same I2C address and Part ID
+  // User-facing sensors (optional – comment out any you don’t use)
+  sensor::Sensor *red_sensor{nullptr};
+  sensor::Sensor *ir_sensor{nullptr};
+  sensor::Sensor *green_sensor{nullptr};
+  sensor::Sensor *die_temp_sensor{nullptr};
 
-#define I2C_SPEED_STANDARD        100000
-#define I2C_SPEED_FAST            400000
+  // Config setters (you can also wire these from YAML)
+  void set_address(uint8_t addr) { address_ = addr; }
+  void set_led_mode(uint8_t mode) { led_mode_ = mode; }                 // 1=Red, 2=Red+IR, 3=Red+IR+Green
+  void set_sample_average(uint8_t avg) { sample_average_ = avg; }       // 1,2,4,8,16,32
+  void set_sample_rate(int rate_hz) { sample_rate_hz_ = rate_hz; }      // 50..3200 (see SparkFun docs)
+  void set_pulse_width_us(int pw_us) { pulse_width_us_ = pw_us; }       // 69,118,215,411
+  void set_adc_range(int rng) { adc_range_ = rng; }                     // 2048,4096,8192,16384
+  void set_brightness(uint8_t b) { led_brightness_ = b; }               // 0x00..0xFF
 
-//Define the size of the I2C buffer based on the platform the user has
-#if defined(__AVR_ATmega328P__) || defined(__AVR_ATmega168__)
+  void setup() override;
+  void update() override;
 
-  //I2C_BUFFER_LENGTH is defined in Wire.H
-  #define I2C_BUFFER_LENGTH BUFFER_LENGTH
+ protected:
+  void apply_sensor_config_();
 
-#elif defined(__SAMD21G18A__)
+  MAX30105 sensor_;                   // <-- SparkFun device handle (replaces PulseOximeter30101 pox_)
+  uint8_t address_{0x57};
 
-  //SAMD21 uses RingBuffer.h
-  #define I2C_BUFFER_LENGTH SERIAL_BUFFER_SIZE
-
-#else
-
-  //The catch-all default is 32
-  #define I2C_BUFFER_LENGTH 32
-
-#endif
-
-class MAX30105 {
- public: 
-  MAX30105(void);
-
-  boolean begin(TwoWire &wirePort = Wire, uint32_t i2cSpeed = I2C_SPEED_STANDARD, uint8_t i2caddr = MAX30105_ADDRESS);
-
-  uint32_t getRed(void); //Returns immediate red value
-  uint32_t getIR(void); //Returns immediate IR value
-  uint32_t getGreen(void); //Returns immediate green value
-  bool safeCheck(uint8_t maxTimeToCheck); //Given a max amount of time, check for new data
-
-  // Configuration
-  void softReset();
-  void shutDown(); 
-  void wakeUp(); 
-
-  void setLEDMode(uint8_t mode);
-
-  void setADCRange(uint8_t adcRange);
-  void setSampleRate(uint8_t sampleRate);
-  void setPulseWidth(uint8_t pulseWidth);
-
-  void setPulseAmplitudeRed(uint8_t value);
-  void setPulseAmplitudeIR(uint8_t value);
-  void setPulseAmplitudeGreen(uint8_t value);
-  void setPulseAmplitudeProximity(uint8_t value);
-
-  void setProximityThreshold(uint8_t threshMSB);
-
-  //Multi-led configuration mode (page 22)
-  void enableSlot(uint8_t slotNumber, uint8_t device); //Given slot number, assign a device to slot
-  void disableSlots(void);
-  
-  // Data Collection
-
-  //Interrupts (page 13, 14)
-  uint8_t getINT1(void); //Returns the main interrupt group
-  uint8_t getINT2(void); //Returns the temp ready interrupt
-  void enableAFULL(void); //Enable/disable individual interrupts
-  void disableAFULL(void);
-  void enableDATARDY(void);
-  void disableDATARDY(void);
-  void enableALCOVF(void);
-  void disableALCOVF(void);
-  void enablePROXINT(void);
-  void disablePROXINT(void);
-  void enableDIETEMPRDY(void);
-  void disableDIETEMPRDY(void);
-
-  //FIFO Configuration (page 18)
-  void setFIFOAverage(uint8_t samples);
-  void enableFIFORollover();
-  void disableFIFORollover();
-  void setFIFOAlmostFull(uint8_t samples);
-  
-  //FIFO Reading
-  uint16_t check(void); //Checks for new data and fills FIFO
-  uint8_t available(void); //Tells caller how many new samples are available (head - tail)
-  void nextSample(void); //Advances the tail of the sense array
-  uint32_t getFIFORed(void); //Returns the FIFO sample pointed to by tail
-  uint32_t getFIFOIR(void); //Returns the FIFO sample pointed to by tail
-  uint32_t getFIFOGreen(void); //Returns the FIFO sample pointed to by tail
-
-  uint8_t getWritePointer(void);
-  uint8_t getReadPointer(void);
-  void clearFIFO(void); //Sets the read/write pointers to zero
-
-  //Proximity Mode Interrupt Threshold
-  void setPROXINTTHRESH(uint8_t val);
-
-  // Die Temperature
-  float readTemperature();
-  float readTemperatureF();
-
-  // Detecting ID/Revision
-  uint8_t getRevisionID();
-  uint8_t readPartID();  
-
-  // Setup the IC with user selectable settings
-  void setup(byte powerLevel = 0x1F, byte sampleAverage = 4, byte ledMode = 3, int sampleRate = 400, int pulseWidth = 411, int adcRange = 4096);
-
-  // Low-level I2C communication
-  uint8_t readRegister8(uint8_t address, uint8_t reg);
-  void writeRegister8(uint8_t address, uint8_t reg, uint8_t value);
-
- private:
-  TwoWire *_i2cPort; //The generic connection to user's chosen I2C hardware
-  uint8_t _i2caddr;
-
-  //activeLEDs is the number of channels turned on, and can be 1 to 3. 2 is common for Red+IR.
-  byte activeLEDs; //Gets set during setup. Allows check() to calculate how many bytes to read from FIFO
-  
-  uint8_t revisionID; 
-
-  void readRevisionID();
-
-  void bitMask(uint8_t reg, uint8_t mask, uint8_t thing);
- 
-   #define STORAGE_SIZE 4 //Each long is 4 bytes so limit this to fit on your micro
-  typedef struct Record
-  {
-    uint32_t red[STORAGE_SIZE];
-    uint32_t IR[STORAGE_SIZE];
-    uint32_t green[STORAGE_SIZE];
-    byte head;
-    byte tail;
-  } sense_struct; //This is our circular buffer of readings from the sensor
-
-  sense_struct sense;
-
+  // Defaults are safe; adjust from YAML
+  uint8_t led_mode_{2};               // Red+IR
+  uint8_t sample_average_{8};         // 8 samples avg
+  int sample_rate_hz_{100};           // 100 Hz
+  int pulse_width_us_{411};           // 411 us
+  int adc_range_{16384};              // 16-bit range
+  uint8_t led_brightness_{0x1F};      // modest brightness
 };
+
+}  // namespace max30101
+}  // namespace esphome
