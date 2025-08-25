@@ -6,7 +6,6 @@
 
 // Local stub/driver header (kept in same folder for simple includes)
 #include "MAX30105.h"
-
 namespace esphome {
 namespace max30101 {
 
@@ -27,7 +26,9 @@ class Max30101Component : public PollingComponent, public i2c::I2CDevice {
   void update() override;
 
  protected:
+  // >>> THIS MEMBER MUST EXIST <<<
   PulseOximeter30101 pox_;
+
   bool ready_{false};
 
   float ir_current_ma_{7.6f};
