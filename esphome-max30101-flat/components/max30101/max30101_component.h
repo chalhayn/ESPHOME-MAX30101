@@ -5,7 +5,7 @@
 #include "esphome/components/sensor/sensor.h"
 
 // Local stub/driver header (kept in same folder for simple includes)
-#include "MAX30101_PulseOximeter.h"
+#include "MAX30105.h"
 
 namespace esphome {
 namespace max30101 {
