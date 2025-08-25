@@ -5,7 +5,7 @@
 #include "esphome/components/sensor/sensor.h"
 
 // Vendored Arduino-style library bundled in third_party/
-#include "MAX30105.h"
+#include "third_party/MAX30105.h" 
 max30105 pox_;   // member exists again
 namespace esphome {
 namespace max30101 {
