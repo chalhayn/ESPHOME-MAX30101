@@ -1,4 +1,3 @@
-
 #include "max30101_component.h"
 #include "esphome/core/log.h"
 #include <cmath>
@@ -40,16 +39,11 @@ void Max30101Component::update() {
     return;
 
   this->pox_.update();
-
   float hr = this->pox_.getHeartRate();
   float spo2 = this->pox_.getSpO2();
 
-  if (!std::isnan(hr) && this->hr_sensor_ != nullptr) {
-    this->hr_sensor_->publish_state(hr);
-  }
-  if (!std::isnan(spo2) && this->spo2_sensor_ != nullptr) {
-    this->spo2_sensor_->publish_state(spo2);
-  }
+  if (!std::isnan(hr) && this->hr_sensor_ != nullptr) this->hr_sensor_->publish_state(hr);
+  if (!std::isnan(spo2) && this->spo2_sensor_ != nullptr) this->spo2_sensor_->publish_state(spo2);
 }
 
 }  // namespace max30101
