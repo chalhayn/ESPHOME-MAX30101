@@ -1,12 +1,11 @@
 
-#pragma once
+#pragma once 
 #include "esphome/core/component.h"
 #include "esphome/components/i2c/i2c.h"
 #include "esphome/components/sensor/sensor.h"
 
 // Vendored Arduino-style library bundled in third_party/
-#include "components/max30101//MAX30105.h" 
-max30105 pox_;   // member exists again
+#include "components/max30101/MAX30105.h"
 namespace esphome {
 namespace max30101 {
 
