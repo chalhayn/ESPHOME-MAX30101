@@ -1,4 +1,4 @@
-#include "max30102.h"
+#include "max30105.h"
 #include "esphome/core/log.h"
 
 namespace esphome {
