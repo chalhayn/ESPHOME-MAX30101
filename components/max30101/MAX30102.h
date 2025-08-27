@@ -3,7 +3,7 @@
 #include "esphome/core/component.h"
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/i2c/i2c.h"
-#include "MAX30105.h"  // SparkFun library
+#include "MAX30102.h"  // SparkFun library
 #include "heartRate.h" // SparkFun library
 
 namespace esphome {
