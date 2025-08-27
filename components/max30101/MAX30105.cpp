@@ -1,65 +1,69 @@
-#include "max30101_component.h"
+#include "max30102.h"
+#include "esphome/core/log.h"
 
 namespace esphome {
-namespace max30101 {
+namespace max30102 {
 
-static const char *const TAG = "max30101";
+static const char *TAG = "max30102";
 
-void Max30101Component::setup() {
-  // Initialize I2C device
-  if (!this->sensor_.begin(Wire, I2C_SPEED_FAST, this->address_)) {
-    ESP_LOGE(TAG, "MAX3010x not found at 0x%02X", this->address_);
+void MAX30102Component::setup() {
+  ESP_LOGCONFIG(TAG, "Setting up MAX30102...");
+  
+  if (!particleSensor_.begin()) {
+    ESP_LOGE(TAG, "MAX30102 was not found. Please check wiring/power.");
     this->mark_failed();
     return;
   }
 
-  apply_sensor_config_();
-
-  ESP_LOGI(TAG, "MAX3010x initialized (addr=0x%02X, mode=%u, rate=%dHz, pw=%dus, range=%d, avg=%u, bright=0x%02X)",
-           this->address_, this->led_mode_, this->sample_rate_hz_, this->pulse_width_us_,
-           this->adc_range_, this->sample_average_, this->led_brightness_);
+  particleSensor_.setup(); // Configure sensor with default settings
+  particleSensor_.setPulseAmplitudeRed(0x0A); // Turn Red LED to low to indicate sensor is running
+  particleSensor_.setPulseAmplitudeGreen(0); // Turn off Green LED
 }
 
-void Max30101Component::apply_sensor_config_() {
-  // SparkFun’s setup packs most config into one call
-  this->sensor_.setup(
-      this->led_brightness_,   // 0x00..0xFF
-      this->sample_average_,   // 1,2,4,8,16,32
-      this->led_mode_,         // 1=Red, 2=Red+IR, 3=Red+IR+Green
-      this->sample_rate_hz_,   // 50..3200
-      this->pulse_width_us_,   // 69,118,215,411
-      this->adc_range_         // 2048,4096,8192,16384
-  );
+void MAX30102Component::update() {
+  long irValue = particleSensor_.getIR();
+  
+  if (checkForBeat(irValue)) {
+    // Calculate time between beats
+    long delta = millis() - last_beat_;
+    last_beat_ = millis();
 
-  // Optional: tweak per-LED amplitudes (leave at default or expose)
-  // this->sensor_.setPulseAmplitudeRed(this->led_brightness_);
-  // this->sensor_.setPulseAmplitudeIR(this->led_brightness_);
-  // this->sensor_.setPulseAmplitudeGreen(this->led_brightness_);
-}
+    // Store valid reading
+    rates_[rate_array_++] = (60 / (delta / 1000.0));
+    rate_array_ %= RATE_SIZE;
 
-void Max30101Component::update() {
-  // Non-blocking sample readiness (max time to check in ms)
-  if (!this->sensor_.safeCheck(5)) {
-    return;  // nothing ready
+    // Take average of readings to smooth out data
+    long total = 0;
+    for (byte i = 0; i < RATE_SIZE; i++) {
+      total += rates_[i];
+    }
+    long beatsPerMinute = total / RATE_SIZE;
+
+    if (heart_rate_sensor_ != nullptr && beatsPerMinute > 20 && beatsPerMinute < 255) {
+      heart_rate_sensor_->publish_state(beatsPerMinute);
+    }
   }
 
-  // Publish raw channels if sensors are configured
-  if (this->ir_sensor != nullptr) {
-    this->ir_sensor->publish_state(static_cast<float>(this->sensor_.getIR()));
-  }
-  if (this->red_sensor != nullptr) {
-    this->red_sensor->publish_state(static_cast<float>(this->sensor_.getRed()));
-  }
-  if (this->green_sensor != nullptr && this->led_mode_ == 3) {
-    this->green_sensor->publish_state(static_cast<float>(this->sensor_.getGreen()));
-  }
-
-  // Optional: die temperature (call occasionally; it’s relatively slow)
-  if (this->die_temp_sensor != nullptr) {
-    float t = this->sensor_.readTemperature();
-    if (!isnan(t)) this->die_temp_sensor->publish_state(t);
+  // Calculate SpO2 (simplified - you may want to implement the full algorithm)
+  if (spo2_sensor_ != nullptr) {
+    // This is a simplified calculation - implement proper SpO2 calculation
+    // based on the ratio of red and IR light absorption
+    uint32_t redValue = particleSensor_.getRed();
+    float ratio = (float)redValue / (float)irValue;
+    float spo2 = 110 - 25 * ratio; // Simplified formula
+    
+    if (spo2 > 80 && spo2 < 100) {
+      spo2_sensor_->publish_state(spo2);
+    }
   }
 }
 
-}  // namespace max30101
+void MAX30102Component::dump_config() {
+  ESP_LOGCONFIG(TAG, "MAX30102:");
+  LOG_I2C_DEVICE(this);
+  LOG_SENSOR("  ", "Heart Rate", this->heart_rate_sensor_);
+  LOG_SENSOR("  ", "SpO2", this->spo2_sensor_);
+}
+
+}  // namespace max30102
 }  // namespace esphome
