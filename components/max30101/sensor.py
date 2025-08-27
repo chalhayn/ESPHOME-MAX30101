@@ -1,54 +1,46 @@
-
 import esphome.codegen as cg
 import esphome.config_validation as cv
-from esphome.components import i2c, sensor
+from esphome.components import sensor
 from esphome.const import (
-    CONF_ID, CONF_ADDRESS, UNIT_PERCENT, ICON_PULSE, UNIT_BEATS_PER_MINUTE
+    CONF_ID, 
+    STATE_CLASS_MEASUREMENT,
+    UNIT_BEATS_PER_MINUTE,
+    UNIT_PERCENT,
+    ICON_HEART_PULSE,
+    ICON_PERCENT
 )
 
-CODEOWNERS = ["@Chalhayn"]
-DEPENDENCIES = ["i2c"]
+from . import max30102_ns, MAX30102Component
 
-max30101_ns = cg.esphome_ns.namespace("max30101")
-Max30101Component = max30101_ns.class_("Max30101Component", cg.PollingComponent, i2c.I2CDevice)
+CONF_HEART_RATE = 'heart_rate'
+CONF_SPO2 = 'spo2'
 
-CONF_HEART_RATE = "heart_rate"
-CONF_SPO2 = "spo2"
-CONF_IR_CURRENT = "ir_led_current_ma"
-CONF_RED_CURRENT = "red_led_current_ma"
-CONF_SAMPLE_RATE = "sample_rate_hz"
-CONF_PULSE_WIDTH_US = "pulse_width_us"
+MAX30102Sensor = max30102_ns.class_('MAX30102Sensor', sensor.Sensor, cg.Component)
 
 CONFIG_SCHEMA = cv.Schema({
-    cv.GenerateID(): cv.declare_id(Max30101Component),
-    cv.Optional(CONF_ADDRESS, default=0x57): cv.i2c_address,
-    cv.Optional(CONF_IR_CURRENT, default=7.6): cv.float_range(min=0.2, max=50.0),
-    cv.Optional(CONF_RED_CURRENT, default=7.6): cv.float_range(min=0.2, max=50.0),
-    cv.Optional(CONF_SAMPLE_RATE, default=100): cv.int_range(min=50, max=400),
-    cv.Optional(CONF_PULSE_WIDTH_US, default=411): cv.one_of(118, 215, 411, 822, int=True),
-    cv.Required(CONF_HEART_RATE): sensor.sensor_schema(
+    cv.GenerateID(): cv.declare_id(MAX30102Component),
+    cv.Optional(CONF_HEART_RATE): sensor.sensor_schema(
         unit_of_measurement=UNIT_BEATS_PER_MINUTE,
-        icon=ICON_PULSE,
-        accuracy_decimals=0
+        icon=ICON_HEART_PULSE,
+        accuracy_decimals=0,
+        state_class=STATE_CLASS_MEASUREMENT,
     ),
-    cv.Required(CONF_SPO2): sensor.sensor_schema(
+    cv.Optional(CONF_SPO2): sensor.sensor_schema(
         unit_of_measurement=UNIT_PERCENT,
-        icon="mdi:water-percent",
-        accuracy_decimals=1
+        icon=ICON_PERCENT,
+        accuracy_decimals=1,
+        state_class=STATE_CLASS_MEASUREMENT,
     ),
-}).extend(cv.polling_component_schema("100ms")).extend(i2c.i2c_device_schema(0x57))
+}).extend(cv.COMPONENT_SCHEMA).extend(cv.polling_component_schema('1s'))
 
-async def to_code(config):
+def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
-    await cg.register_component(var, config)
-    await i2c.register_i2c_device(var, config)
+    yield cg.register_component(var, config)
 
-    cg.add(var.set_ir_current_ma(config[CONF_IR_CURRENT]))
-    cg.add(var.set_red_current_ma(config[CONF_RED_CURRENT]))
-    cg.add(var.set_sample_rate_hz(config[CONF_SAMPLE_RATE]))
-    cg.add(var.set_pulse_width_us(config[CONF_PULSE_WIDTH_US]))
+    if CONF_HEART_RATE in config:
+        sens = yield sensor.new_sensor(config[CONF_HEART_RATE])
+        cg.add(var.set_heart_rate_sensor(sens))
 
-    hr = await sensor.new_sensor(config[CONF_HEART_RATE])
-    spo2 = await sensor.new_sensor(config[CONF_SPO2])
-    cg.add(var.set_hr_sensor(hr))
-    cg.add(var.set_spo2_sensor(spo2))
+    if CONF_SPO2 in config:
+        sens = yield sensor.new_sensor(config[CONF_SPO2])
+        cg.add(var.set_spo2_sensor(sens))
