@@ -7,7 +7,7 @@ DEPENDENCIES = ["i2c"]
 CODEOWNERS = ["@yourusername"]
 
 max30102_native_ns = cg.esphome_ns.namespace("max30102_native")
-MAX30102NativeComponent = max30102_native_ns.class_("MAX30102NativeComponent", cg.Component, i2c.I2CDevice)
+MAX30102NativeComponent = max30102_native_ns.class_("MAX30102NativeComponent", cg.PollingComponent, i2c.I2CDevice)
 
 CONFIG_SCHEMA = (
     cv.Schema({
