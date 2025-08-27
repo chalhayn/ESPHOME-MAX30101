@@ -1,5 +1,6 @@
-#include "max30102.h"
+
 #include "esphome/core/log.h"
+#include "max30102.h"
 
 namespace esphome {
 namespace max30102 {
