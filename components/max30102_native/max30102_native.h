@@ -1,82 +1,88 @@
-#pragma once
-
-#include "esphome/core/component.h"
-#include "esphome/components/sensor/sensor.h"
-#include "esphome/components/i2c/i2c.h"
+#include "max30102_native.h"
+#include "esphome/core/log.h"
+#include "esphome/core/hal.h"
+#include <heartRate.h>  // from SparkFun MAX3010x library
 
 namespace esphome {
 namespace max30102_native {
 
-// MAX30102 Register addresses
-static const uint8_t MAX30102_ADDRESS = 0x57;
+static const char *const TAG = "max30102_native";
 
-// Status Registers
-static const uint8_t REG_INTR_STATUS_1 = 0x00;
-static const uint8_t REG_INTR_STATUS_2 = 0x01;
-static const uint8_t REG_INTR_ENABLE_1 = 0x02;
-static const uint8_t REG_INTR_ENABLE_2 = 0x03;
+void MAX30102NativeSensor::setup() {
+  ESP_LOGCONFIG(TAG, "Setting up MAX30102 Native...");
 
-// FIFO Registers
-static const uint8_t REG_FIFO_WR_PTR = 0x04;
-static const uint8_t REG_OVF_COUNTER = 0x05;
-static const uint8_t REG_FIFO_RD_PTR = 0x06;
-static const uint8_t REG_FIFO_DATA = 0x07;
+  // Check if sensor is present
+  uint8_t part_id;
+  if (!this->read_byte(REG_PART_ID, &part_id)) {
+    ESP_LOGE(TAG, "Failed to read part ID");
+    this->mark_failed();
+    return;
+  }
 
-// Configuration Registers
-static const uint8_t REG_FIFO_CONFIG = 0x08;
-static const uint8_t REG_MODE_CONFIG = 0x09;
-static const uint8_t REG_SPO2_CONFIG = 0x0A;
-static const uint8_t REG_LED1_PA = 0x0C;
-static const uint8_t REG_LED2_PA = 0x0D;
+  if (part_id != MAX30102_EXPECTEDPARTID) {
+    ESP_LOGE(TAG, "MAX30102 not found. Expected: 0x%02X, Got: 0x%02X", MAX30102_EXPECTEDPARTID, part_id);
+    this->mark_failed();
+    return;
+  }
 
-// Die Temperature Registers
-static const uint8_t REG_TEMP_INTR = 0x1F;
-static const uint8_t REG_TEMP_FRAC = 0x20;
-static const uint8_t REG_TEMP_CONFIG = 0x21;
+  if (!this->initialize_sensor()) {
+    ESP_LOGE(TAG, "Failed to initialize MAX30102");
+    this->mark_failed();
+    return;
+  }
 
-// Part ID Registers
-static const uint8_t REG_REV_ID = 0xFE;
-static const uint8_t REG_PART_ID = 0xFF;
+  ESP_LOGCONFIG(TAG, "MAX30102 Native initialized successfully");
+}
 
-// Expected values
-static const uint8_t MAX30102_EXPECTEDPARTID = 0x15;
+bool MAX30102NativeSensor::initialize_sensor() {
+  // Reset sensor
+  if (!this->write_byte(REG_MODE_CONFIG, 0x40)) return false;
+  delay(100);
 
-class MAX30102NativeSensor : public PollingComponent, public i2c::I2CDevice {
- public:
-  void setup() override;
-  void update() override;
-  void dump_config() override;
+  // FIFO: avg=4, rollover=0, almost_full=0x10 (0x50)
+  if (!this->write_byte(REG_FIFO_CONFIG, 0x50)) return false;
 
-  void set_heart_rate_sensor(sensor::Sensor *heart_rate_sensor) { heart_rate_sensor_ = heart_rate_sensor; }
-  void set_spo2_sensor(sensor::Sensor *spo2_sensor) { spo2_sensor_ = spo2_sensor; }
+  // SpO2 mode
+  if (!this->write_byte(REG_MODE_CONFIG, 0x03)) return false;
 
- protected:
-  sensor::Sensor *heart_rate_sensor_{nullptr};
-  sensor::Sensor *spo2_sensor_{nullptr};
+  // SpO2 config: ADC=4096nA, SR=100Hz, PW=411us (0x27)
+  if (!this->write_byte(REG_SPO2_CONFIG, 0x27)) return false;
 
-  // Heart rate calculation variables
-  static const uint8_t RATE_SIZE = 4;
-  int32_t rates_[RATE_SIZE];
-  uint8_t rate_array_ = 0;
-  uint32_t last_beat_ = 0;
-  
-  // Internal methods
-  bool initialize_sensor();
-  uint32_t get_ir();
-  uint32_t get_red();
-  bool check_for_beat(int32_t sample);
-  void clear_fifo();
-  
-  // Beat detection variables
-  int32_t ir_ac_max_ = 20;
-  int32_t ir_ac_min_ = -20;
-  
-  // Simple moving average for beat detection
-  static const uint8_t MA4_SIZE = 4;
-  int32_t an_x_[MA4_SIZE];
-  int32_t an_y_[MA4_SIZE];
-  uint8_t n_buffer_count_ = 0;
-};
+  // LED amplitudes (mid-level; tune if needed)
+  if (!this->write_byte(REG_LED1_PA, 0x24)) return false;  // RED
+  if (!this->write_byte(REG_LED2_PA, 0x24)) return false;  // IR
 
-}  // namespace max30102_native
-}  // namespace esphome
+  this->clear_fifo();
+  return true;
+}
+
+void MAX30102NativeSensor::clear_fifo() {
+  this->write_byte(REG_FIFO_WR_PTR, 0);
+  this->write_byte(REG_OVF_COUNTER, 0);
+  this->write_byte(REG_FIFO_RD_PTR, 0);
+}
+
+// Legacy helpers retained (not used by update())
+uint32_t MAX30102NativeSensor::get_ir() {
+  uint8_t data[3];
+  if (!this->read_bytes(REG_FIFO_DATA, data, 3)) return 0;
+  return ((uint32_t)data[0] << 16) | ((uint32_t)data[1] << 8) | data[2];
+}
+
+uint32_t MAX30102NativeSensor::get_red() {
+  uint8_t data[3];
+  if (!this->read_bytes(REG_FIFO_DATA, data, 3)) return 0;
+  return ((uint32_t)data[0] << 16) | ((uint32_t)data[1] << 8) | data[2];
+}
+
+bool MAX30102NativeSensor::check_for_beat(int32_t) {
+  // Unused; rely on SparkFun's checkForBeat()
+  return false;
+}
+
+void MAX30102NativeSensor::update() {
+  // Determine how many 3-byte samples are waiting in FIFO
+  uint8_t rd = 0, wr = 0;
+  if (!this->read_byte(REG_FIFO_RD_PTR, &rd) || !this->read_byte(REG_FIFO_WR_PTR, &wr)) {
+    ESP_LOGD(TAG, "FIFO pointer read failed");
+    return
