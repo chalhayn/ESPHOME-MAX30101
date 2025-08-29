@@ -62,8 +62,21 @@ void MAX30102NativeSensor::clear_fifo() {
   this->write_byte(REG_FIFO_RD_PTR, 0);
 }
 
+// Legacy helpers retained (not used by update())
+uint32_t MAX30102NativeSensor::get_ir() {
+  uint8_t data[3];
+  if (!this->read_bytes(REG_FIFO_DATA, data, 3)) return 0;
+  return ((uint32_t)data[0] << 16) | ((uint32_t)data[1] << 8) | data[2];
+}
+
+uint32_t MAX30102NativeSensor::get_red() {
+  uint8_t data[3];
+  if (!this->read_bytes(REG_FIFO_DATA, data, 3)) return 0;
+  return ((uint32_t)data[0] << 16) | ((uint32_t)data[1] << 8) | data[2];
+}
+
 bool MAX30102NativeSensor::check_for_beat(int32_t) {
-  // UNUSED now; we use SparkFun's checkForBeat() instead.
+  // Unused; we rely on SparkFun's checkForBeat()
   return false;
 }
 
@@ -77,7 +90,7 @@ void MAX30102NativeSensor::update() {
   uint8_t samples = (wr - rd) & 0x1F;  // 32-deep FIFO, modulo 32
   if (samples < 2) samples = 2;        // process at least one RED+IR pair
 
-  // Process pairs (RED+IR). Each pair consumes 2 samples (6 bytes).
+  // Process pairs (RED+IR). Each pair consumes 2 samples (6 bytes total).
   for (uint8_t i = 0; i + 1 < samples; i += 2) {
     uint8_t data[6];
     if (!this->read_bytes(REG_FIFO_DATA, data, 6)) {
@@ -85,62 +98,8 @@ void MAX30102NativeSensor::update() {
       break;
     }
 
-    // In SpO2 mode, order is RED then IR, each 18-bit
+    // In SpO2 mode, order is RED then IR, each 18-bit packed into 3 bytes
     uint32_t red_value = ((uint32_t)data[0] << 16) | ((uint32_t)data[1] << 8) | data[2];
     uint32_t ir_value  = ((uint32_t)data[3] << 16) | ((uint32_t)data[4] << 8) | data[5];
 
-    const uint32_t FINGER_IR_MIN  = 20000;
-    const uint32_t FINGER_RED_MIN = 10000;
-
-    // ---- Heart Rate via SparkFun detector on IR channel ----
-    if (ir_value > FINGER_IR_MIN) {
-      if (checkForBeat(ir_value)) {  // from heartRate.h
-        uint32_t now = millis();
-        if (this->last_beat_ != 0) {
-          uint32_t dt = now - this->last_beat_;
-          if (dt > 300 && dt < 3000) { // 20–200 BPM
-            int32_t bpm = 60000 / (int32_t) dt;
-
-            // Average a few beats for stability
-            this->rates_[this->rate_array_ % RATE_SIZE] = bpm;
-            this->rate_array_++;
-
-            int32_t total = 0;
-            for (uint8_t k = 0; k < RATE_SIZE; k++) total += this->rates_[k];
-            int32_t avg_bpm = total / RATE_SIZE;
-
-            if (this->heart_rate_sensor_ != nullptr && avg_bpm > 40 && avg_bpm < 200) {
-              this->heart_rate_sensor_->publish_state(avg_bpm);
-              ESP_LOGD(TAG, "Heart Rate: %ld BPM", (long) avg_bpm);
-            }
-          }
-        }
-        this->last_beat_ = now;
-      }
-
-      // ---- SpO2 (simple DC-level ratio) ----
-      if (this->spo2_sensor_ != nullptr && red_value > FINGER_RED_MIN) {
-        float ratio = (float) red_value / (float) ir_value;  // RED/IR
-        if (ratio > 0.1f && ratio < 3.0f) {
-          float spo2 = 104.0f - 17.0f * ratio;               // crude linearization
-          if (spo2 > 70.0f && spo2 < 100.0f) {
-            this->spo2_sensor_->publish_state(spo2);
-          }
-        }
-      }
-    }
-  }
-}
-
-void MAX30102NativeSensor::dump_config() {
-  ESP_LOGCONFIG(TAG, "MAX30102 Native:");
-  LOG_I2C_DEVICE(this);
-  if (this->is_failed()) {
-    ESP_LOGE(TAG, "Communication with MAX30102 failed!");
-  }
-  LOG_SENSOR("  ", "Heart Rate", this->heart_rate_sensor_);
-  LOG_SENSOR("  ", "SpO2", this->spo2_sensor_);
-}
-
-}  // namespace max30102_native
-}  // namespace esphome
+    // Gentle finger
