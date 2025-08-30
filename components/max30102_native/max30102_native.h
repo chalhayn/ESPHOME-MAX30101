@@ -45,6 +45,15 @@ class MAX30102NativeSensor : public PollingComponent, public i2c::I2CDevice {
   sensor::Sensor *heart_rate_sensor_{nullptr};
   sensor::Sensor *spo2_sensor_{nullptr};
 
+  // SpO2 algorithm buffers (expects ~25 Hz and ~100-sample window)
+  static const uint16_t SPO2_WIN = 100;      // window length for algorithm
+  static const uint8_t  SPO2_DECIM = 4;      // 100 Hz / 4 = 25 Hz fed to algo
+  int32_t ir_buf_[SPO2_WIN]  = {0};
+  int32_t red_buf_[SPO2_WIN] = {0};
+  uint16_t spo2_count_ = 0;
+  uint8_t decim_count_ = 0;
+
+
   // Beat timing / smoothing state
   static const uint8_t RATE_SIZE = 8;
   int32_t  rates_[RATE_SIZE] = {0};  // here used to store recent inter-beat intervals (ms)
