@@ -2,6 +2,7 @@
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"
 #include <heartRate.h>  // SparkFun MAX3010x library
+#include <spo2_algorithm.h> 
 
 namespace esphome {
 namespace max30102_native {
