@@ -2,11 +2,10 @@
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"
 
-// Keep C-style algo headers OUTSIDE any namespace,
-// so their symbols aren't pulled into esphome::... namespaces.
-#include <heartRate.h>           // SparkFun MAX3010x beat detector
-#include <spo2_algorithm.h>      // Maxim/ProtoCentral SpO2 algorithm
-#include <cstring>               // std::memmove
+// Keep C-style algo headers OUTSIDE any namespace.
+#include <heartRate.h>        // SparkFun MAX3010x PBA beat detector
+#include <spo2_algorithm.h>   // Maxim/ProtoCentral SpO2 algorithm
+#include <cstring>            // std::memmove
 
 namespace esphome {
 namespace max30102_native {
@@ -39,17 +38,17 @@ void MAX30102NativeSensor::setup() {
 }
 
 bool MAX30102NativeSensor::initialize_sensor() {
-  // Reset
+  // Soft reset
   if (!this->write_byte(REG_MODE_CONFIG, 0x40)) return false;
   delay(100);
 
-  // FIFO: sample avg=4 (bits 7:5 = 0b010), rollover=0, almost_full=0x10 -> 0x50
+  // FIFO: sample avg=4 (bits 7:5=010), rollover=0, almost_full=0x10 -> 0x50
   if (!this->write_byte(REG_FIFO_CONFIG, 0x50)) return false;
 
-  // SpO2 mode
+  // SpO2 mode (0x03)
   if (!this->write_byte(REG_MODE_CONFIG, 0x03)) return false;
 
-  // SpO2 config: ADC range=4096 nA, sample rate=100 Hz, pulse width=411 us -> 0x27
+  // SpO2 config: ADC range=4096nA, sample rate=100Hz, pulse width=411us -> 0x27
   if (!this->write_byte(REG_SPO2_CONFIG, 0x27)) return false;
 
   // LED currents (tune as needed)
@@ -66,7 +65,7 @@ void MAX30102NativeSensor::clear_fifo() {
   this->write_byte(REG_FIFO_RD_PTR, 0);
 }
 
-// Legacy helpers (not used by update() anymore; kept for compatibility)
+// Optional/legacy helpers (not used by update(); kept for compatibility)
 uint32_t MAX30102NativeSensor::get_ir() {
   uint8_t data[3];
   if (!this->read_bytes(REG_FIFO_DATA, data, 3)) return 0;
@@ -80,12 +79,12 @@ uint32_t MAX30102NativeSensor::get_red() {
 }
 
 bool MAX30102NativeSensor::check_for_beat(int32_t) {
-  // Unused; we leverage SparkFun's checkForBeat() in update()
+  // Unused; we leverage SparkFun's checkForBeat() directly in update()
   return false;
 }
 
 void MAX30102NativeSensor::update() {
-  // How many 3-byte samples are waiting?
+  // Determine how many 3-byte samples are waiting in FIFO
   uint8_t rd = 0, wr = 0;
   if (!this->read_byte(REG_FIFO_RD_PTR, &rd) || !this->read_byte(REG_FIFO_WR_PTR, &wr)) {
     ESP_LOGD(TAG, "FIFO pointer read failed");
@@ -106,7 +105,7 @@ void MAX30102NativeSensor::update() {
     uint32_t red_u = ((uint32_t)data[0] << 16) | ((uint32_t)data[1] << 8) | data[2];
     uint32_t ir_u  = ((uint32_t)data[3] << 16) | ((uint32_t)data[4] << 8) | data[5];
 
-    // Gentle finger-present gates (tune for your device/contact)
+    // Simple finger-present gates (tune for your device/contact)
     const uint32_t FINGER_IR_MIN  = 20000;
     const uint32_t FINGER_RED_MIN = 10000;
     if (ir_u < FINGER_IR_MIN || red_u < FINGER_RED_MIN) continue;
@@ -117,7 +116,7 @@ void MAX30102NativeSensor::update() {
       if (this->last_beat_ != 0) {
         uint32_t dt = now - this->last_beat_;  // inter-beat interval (ms)
         if (dt > 300 && dt < 3000) {           // 20–200 BPM
-          // Store IBI (ms) into ring buffer; we'll compute BPM from mean IBI for steadiness
+          // Store IBI (ms) into ring buffer; compute BPM from mean IBI
           this->rates_[this->rate_array_ % RATE_SIZE] = (int32_t) dt;
           this->rate_array_++;
 
@@ -140,13 +139,13 @@ void MAX30102NativeSensor::update() {
       this->last_beat_ = now;
     }
 
-    // ---- SpO2 via spo2_algorithm.h ----
+    // ---- SpO₂ via spo2_algorithm.h ----
     // Decimate 100 Hz -> 25 Hz (push every 4th sample to the algorithm buffer)
     if (++this->decim_count_ >= SPO2_DECIM) {
       this->decim_count_ = 0;
 
       if (this->spo2_count_ < SPO2_WIN) {
-        this->ir_buf_[this->spo2_count_]  = ir_u;   // uint32_t buffers
+        this->ir_buf_[this->spo2_count_]  = ir_u;   // uint32_t buffers (non-AVR signature)
         this->red_buf_[this->spo2_count_] = red_u;
         this->spo2_count_++;
       }
@@ -163,7 +162,7 @@ void MAX30102NativeSensor::update() {
           &hr_algo, &hr_valid
         );
 
-        // Publish SpO2 if valid
+        // Publish SpO₂ if valid
         if (this->spo2_sensor_ && spo2_valid && spo2 > 70 && spo2 <= 100) {
           this->spo2_sensor_->publish_state((float) spo2);
           ESP_LOGD(TAG, "SpO2 algo: %ld%% (valid=%d)", (long) spo2, (int) spo2_valid);
