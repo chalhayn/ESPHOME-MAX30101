@@ -59,14 +59,14 @@ class MAX30102NativeSensor : public PollingComponent, public i2c::I2CDevice {
   static constexpr uint32_t FINGER_RED_MIN = 10000;
 
   // DC tracking for crude perfusion index (AC/DC%)
-  static constexpr float DC_ALPHA   = 0.95f;  // EMA; larger = slower, smoother baseline
-  static constexpr float PERF_MIN_PCT = 0.5f; // accept if 0.5% ≤ PI ≤ 5%
-  static constexpr float PERF_MAX_PCT = 5.0f;
+  static constexpr float DC_ALPHA     = 0.95f;  // EMA; larger = slower, smoother baseline
+  static constexpr float PERF_MIN_PCT = 0.10f;  // relaxed (was 0.5)
+  static constexpr float PERF_MAX_PCT = 12.0f;  // relaxed (was 5.0)
 
   // Publication guards
-  static constexpr float SPO2_JUMP_MAX_PCT = 3.0f;  // clamp ±3% steps
-  static constexpr uint8_t SPO2_SETTLE_WINDOWS = 5; // ignore first ~10s (5 windows x 2s slide)
-  static constexpr float HR_ALGO_IBI_DIFF_MAX = 25.0f; // bpm max divergence allowed
+  static constexpr float   SPO2_JUMP_MAX_PCT    = 5.0f;  // widened (was 3.0)
+  static constexpr uint8_t SPO2_SETTLE_WINDOWS  = 2;     // shorter settle (was 5)
+  static constexpr float   HR_ALGO_IBI_DIFF_MAX = 25.0f; // bpm max divergence allowed
 
   // ---------- State ----------
   // SpO₂ buffers
@@ -80,14 +80,14 @@ class MAX30102NativeSensor : public PollingComponent, public i2c::I2CDevice {
   int32_t  rates_[RATE_SIZE] = {0};  // recent inter-beat intervals (ms)
   uint32_t rate_array_{0};
   uint32_t last_beat_{0};
-  float    last_ibi_bpm_{NAN};       // last published IBI BPM (for gating HR_algo)
+  float    last_ibi_bpm_{0.0f};      // set to NaN in setup()
 
   // DC baselines for perfusion index
   float dc_ir_{0.0f};
   float dc_red_{0.0f};
 
   // SpO₂ publication stability
-  float   last_spo2_{NAN};
+  float   last_spo2_{0.0f};          // set to NaN in setup()
   uint8_t spo2_settle_windows_{0};
 };
 
