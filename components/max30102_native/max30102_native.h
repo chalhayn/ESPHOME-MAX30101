@@ -63,15 +63,22 @@ class MAX30102NativeSensor : public PollingComponent, public i2c::I2CDevice {
   static constexpr float PERF_MIN_PCT = 0.10f;  // relaxed (was 0.5)
   static constexpr float PERF_MAX_PCT = 12.0f;  // relaxed (was 5.0)
 
-  // Publication guards
+  // SpO₂ publication guards
   static constexpr float   SPO2_JUMP_MAX_PCT    = 5.0f;   // widened (was 3.0)
   static constexpr uint8_t SPO2_SETTLE_WINDOWS  = 2;      // shorter settle (was 5)
-  static constexpr float   HR_ALGO_IBI_DIFF_MAX = 25.0f;  // legacy (kept for reference)
 
-  // ---- NEW: prefer IBI; only optionally publish HR_algo if it agrees tightly ----
+  // ---- SpO₂ calibration (simple bias & soft ceiling) ----
+  static constexpr float   SPO2_OFFSET          = -2.0f;  // default −2% (tune to your pulse-ox)
+  static constexpr float   SPO2_MAX_PUBLISH     = 99.0f;  // soft cap so we don't peg at 100
+
+  // ---- HR preferences: prefer IBI; optionally publish HR_algo if it agrees tightly ----
   static constexpr bool    PUBLISH_HR_ALGO         = false; // default OFF (IBI is authoritative)
   static constexpr uint8_t HR_IBI_MIN_BEATS        = 5;      // need ≥5 valid IBI samples
   static constexpr float   HR_ALGO_IBI_DIFF_TIGHT  = 12.0f;  // max allowed diff (bpm)
+
+  // ---- HR robustness: reject IBI outliers vs rolling median ----
+  static constexpr float   IBI_OUTLIER_LOW_FACTOR  = 0.60f;  // reject < 0.60× median
+  static constexpr float   IBI_OUTLIER_HIGH_FACTOR = 1.40f;  // reject > 1.40× median
 
   // ---------- State ----------
   // SpO₂ buffers
