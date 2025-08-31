@@ -5,7 +5,9 @@
 // Keep C-style algo headers OUTSIDE any namespace.
 #include <heartRate.h>        // SparkFun MAX3010x PBA beat detector
 #include <spo2_algorithm.h>   // Maxim/ProtoCentral SpO2 algorithm
+
 #include <cstring>            // std::memmove
+#include <cmath>              // std::isnan, std::fabs
 
 namespace esphome {
 namespace max30102_native {
@@ -34,6 +36,11 @@ void MAX30102NativeSensor::setup() {
     return;
   }
 
+  // Initialize publication state
+  this->last_spo2_ = NAN;
+  this->spo2_settle_windows_ = 0;
+  this->last_ibi_bpm_ = NAN;
+
   ESP_LOGCONFIG(TAG, "MAX30102 Native initialized successfully");
 }
 
@@ -42,8 +49,8 @@ bool MAX30102NativeSensor::initialize_sensor() {
   if (!this->write_byte(REG_MODE_CONFIG, 0x40)) return false;
   delay(100);
 
-  // FIFO: sample avg=4 (bits 7:5=010), rollover=0, almost_full=0x10 -> 0x50
-  if (!this->write_byte(REG_FIFO_CONFIG, 0x50)) return false;
+  // FIFO config: sample avg=8, rollover=0, fifo_a_full default
+  if (!this->write_byte(REG_FIFO_CONFIG, FIFO_CFG_BYTE)) return false;
 
   // SpO2 mode (0x03)
   if (!this->write_byte(REG_MODE_CONFIG, 0x03)) return false;
@@ -101,25 +108,31 @@ void MAX30102NativeSensor::update() {
       break;
     }
 
-    // Unpack 18-bit values
+    // Unpack 18-bit values and mask defensively
     uint32_t red_u = ((uint32_t)data[0] << 16) | ((uint32_t)data[1] << 8) | data[2];
     uint32_t ir_u  = ((uint32_t)data[3] << 16) | ((uint32_t)data[4] << 8) | data[5];
+    red_u &= 0x3FFFF;
+    ir_u  &= 0x3FFFF;
 
-    // Simple finger-present gates (tune for your device/contact)
-    const uint32_t FINGER_IR_MIN  = 20000;
-    const uint32_t FINGER_RED_MIN = 10000;
-    if (ir_u < FINGER_IR_MIN || red_u < FINGER_RED_MIN) continue;
+    // Gentle finger-present gates
+    if (ir_u < FINGER_IR_MIN || red_u < FINGER_RED_MIN) {
+      // Reset settle timer if we "lost contact"
+      // (optional — comment out if you don't want this behavior)
+      // this->spo2_settle_windows_ = 0;
+      continue;
+    }
 
-    // ---- Heart Rate via SparkFun detector on IR channel ----
+    // ---- Heart Rate via SparkFun detector on IR channel (always attempt) ----
     if (checkForBeat((int32_t) ir_u)) {
       uint32_t now = millis();
       if (this->last_beat_ != 0) {
         uint32_t dt = now - this->last_beat_;  // inter-beat interval (ms)
-        if (dt > 300 && dt < 3000) {           // 20–200 BPM
-          // Store IBI (ms) into ring buffer; compute BPM from mean IBI
+        if (dt > 300 && dt < 3000) {           // ~20–200 BPM
+          // Store IBI (ms) into ring buffer
           this->rates_[this->rate_array_ % RATE_SIZE] = (int32_t) dt;
           this->rate_array_++;
 
+          // Compute BPM from mean IBI (smoother)
           uint32_t sum_dt = 0;
           uint8_t count = 0;
           for (uint8_t k = 0; k < RATE_SIZE; k++) {
@@ -128,9 +141,10 @@ void MAX30102NativeSensor::update() {
           }
           if (count >= 2) {
             float avg_dt = (float) sum_dt / (float) count;   // ms
-            float bpm = 60000.0f / avg_dt;                   // bpm from mean IBI
+            float bpm = 60000.0f / avg_dt;                   // bpm
             if (this->heart_rate_sensor_ && bpm > 40.0f && bpm < 200.0f) {
               this->heart_rate_sensor_->publish_state(bpm);
+              this->last_ibi_bpm_ = bpm;
               ESP_LOGD(TAG, "HR (IBI) avg_dt=%.1fms -> bpm=%.1f (n=%u)", avg_dt, bpm, count);
             }
           }
@@ -140,21 +154,33 @@ void MAX30102NativeSensor::update() {
     }
 
     // ---- SpO₂ via spo2_algorithm.h ----
-    // Decimate 100 Hz -> 25 Hz (push every 4th sample to the algorithm buffer)
+    // Track DC baselines and perfusion index (AC/DC%)
+    this->dc_ir_  = (this->dc_ir_  == 0.0f) ? (float) ir_u  : DC_ALPHA * this->dc_ir_  + (1.0f - DC_ALPHA) * (float) ir_u;
+    this->dc_red_ = (this->dc_red_ == 0.0f) ? (float) red_u : DC_ALPHA * this->dc_red_ + (1.0f - DC_ALPHA) * (float) red_u;
+
+    float ac_ir   = std::fabs((float) ir_u  - this->dc_ir_);
+    float ac_red  = std::fabs((float) red_u - this->dc_red_);
+    float pi_ir   = (this->dc_ir_  > 1.0f) ? (ac_ir  / this->dc_ir_ ) * 100.0f : 0.0f;
+    float pi_red  = (this->dc_red_ > 1.0f) ? (ac_red / this->dc_red_) * 100.0f : 0.0f;
+
+    const bool perf_ok = (pi_ir >= PERF_MIN_PCT && pi_ir <= PERF_MAX_PCT) &&
+                         (pi_red >= PERF_MIN_PCT && pi_red <= PERF_MAX_PCT);
+
+    // Decimate 100 Hz -> 25 Hz; only feed SpO₂ buffers when perfusion looks reasonable
     if (++this->decim_count_ >= SPO2_DECIM) {
       this->decim_count_ = 0;
 
-      if (this->spo2_count_ < SPO2_WIN) {
-        this->ir_buf_[this->spo2_count_]  = ir_u;   // uint32_t buffers (non-AVR signature)
+      if (perf_ok && this->spo2_count_ < SPO2_WIN) {
+        this->ir_buf_[this->spo2_count_]  = ir_u;   // uint32_t buffers
         this->red_buf_[this->spo2_count_] = red_u;
         this->spo2_count_++;
       }
 
+      // Run algorithm when the window fills
       if (this->spo2_count_ >= SPO2_WIN) {
         int32_t spo2 = 0, hr_algo = 0;
         int8_t  spo2_valid = 0, hr_valid = 0;
 
-        // The reference algorithm expects ~25 Hz and BUFFER_SIZE=100
         maxim_heart_rate_and_oxygen_saturation(
           this->ir_buf_, (int32_t) SPO2_WIN,
           this->red_buf_,
@@ -162,16 +188,48 @@ void MAX30102NativeSensor::update() {
           &hr_algo, &hr_valid
         );
 
-        // Publish SpO₂ if valid
-        if (this->spo2_sensor_ && spo2_valid && spo2 > 70 && spo2 <= 100) {
-          this->spo2_sensor_->publish_state((float) spo2);
-          ESP_LOGD(TAG, "SpO2 algo: %ld%% (valid=%d)", (long) spo2, (int) spo2_valid);
+        // ---- Publish SpO₂ with stability guards ----
+        if (spo2_valid && spo2 > 70 && spo2 <= 100) {
+          bool settled = (this->spo2_settle_windows_ >= SPO2_SETTLE_WINDOWS);
+          if (!settled) {
+            this->spo2_settle_windows_++;
+            ESP_LOGD(TAG, "SpO2 settle window %u/%u (holding publication)", this->spo2_settle_windows_, SPO2_SETTLE_WINDOWS);
+          } else {
+            bool accept = false;
+            if (std::isnan(this->last_spo2_)) {
+              accept = true;
+            } else {
+              float step = std::fabs((float) spo2 - this->last_spo2_);
+              accept = (step <= SPO2_JUMP_MAX_PCT);
+              if (!accept) {
+                ESP_LOGD(TAG, "SpO2 jump filtered: %.1f -> %ld (Δ=%.1f%% > %.1f%%)", this->last_spo2_, (long) spo2, step, SPO2_JUMP_MAX_PCT);
+              }
+            }
+            if (accept && this->spo2_sensor_) {
+              this->spo2_sensor_->publish_state((float) spo2);
+              this->last_spo2_ = (float) spo2;
+              ESP_LOGD(TAG, "SpO2 algo: %ld%% (valid=%d)", (long) spo2, (int) spo2_valid);
+            }
+          }
         }
 
-        // Optionally publish HR from the algorithm too (often steadier)
-        if (this->heart_rate_sensor_ && hr_valid && hr_algo > 40 && hr_algo < 200) {
-          this->heart_rate_sensor_->publish_state((float) hr_algo);
-          ESP_LOGD(TAG, "HR algo: %ld bpm (valid=%d)", (long) hr_algo, (int) hr_valid);
+        // ---- Publish HR from algorithm only if near IBI (or no IBI yet) ----
+        if (hr_valid && hr_algo > 40 && hr_algo < 200 && this->heart_rate_sensor_) {
+          bool publish_hr_algo = false;
+          if (std::isnan(this->last_ibi_bpm_)) {
+            // No IBI reference yet; allow early publication
+            publish_hr_algo = true;
+          } else {
+            float diff = std::fabs((float) hr_algo - this->last_ibi_bpm_);
+            publish_hr_algo = (diff <= HR_ALGO_IBI_DIFF_MAX);
+            if (!publish_hr_algo) {
+              ESP_LOGD(TAG, "HR algo gated: %ld vs IBI %.1f (Δ=%.1f > %.1f)", (long) hr_algo, this->last_ibi_bpm_, diff, HR_ALGO_IBI_DIFF_MAX);
+            }
+          }
+          if (publish_hr_algo) {
+            this->heart_rate_sensor_->publish_state((float) hr_algo);
+            ESP_LOGD(TAG, "HR algo: %ld bpm (valid=%d)", (long) hr_algo, (int) hr_valid);
+          }
         }
 
         // Slide the window by half (50 samples) to keep outputs responsive
@@ -192,6 +250,11 @@ void MAX30102NativeSensor::dump_config() {
   }
   LOG_SENSOR("  ", "Heart Rate", this->heart_rate_sensor_);
   LOG_SENSOR("  ", "SpO2", this->spo2_sensor_);
+
+  ESP_LOGCONFIG(TAG, "  FIFO avg: 8 samples");
+  ESP_LOGCONFIG(TAG, "  SpO2 settle windows: %u", (unsigned) SPO2_SETTLE_WINDOWS);
+  ESP_LOGCONFIG(TAG, "  SpO2 step clamp: ±%.1f%%", (double) SPO2_JUMP_MAX_PCT);
+  ESP_LOGCONFIG(TAG, "  HR algo vs IBI max diff: %.1f bpm", (double) HR_ALGO_IBI_DIFF_MAX);
 }
 
 }  // namespace max30102_native
