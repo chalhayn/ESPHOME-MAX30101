@@ -47,12 +47,15 @@ class MAX30102NativeSensor : public PollingComponent, public i2c::I2CDevice {
   sensor::Sensor *spo2_sensor_{nullptr};
 
   // ---------- Tunables / guards ----------
-  // FIFO averaging: use 8-sample average to reduce noise (bits 7:5 = 0b011)
-  static constexpr uint8_t FIFO_CFG_BYTE = 0x60;
+  // FIFO averaging: default to 4-sample average for stronger AC (bits 7:5 = 0b010)
+  static constexpr uint8_t FIFO_CFG_BYTE = 0x50;
 
   // SpO₂ algorithm buffers (expects ~25 Hz, ~100-sample window)
   static constexpr uint16_t SPO2_WIN   = 100;
   static constexpr uint8_t  SPO2_DECIM = 4;    // 100 Hz -> 25 Hz
+
+  // Sample clock (must match SPO2 sample rate)
+  static constexpr uint32_t SAMPLE_PERIOD_MS = 10; // 100 Hz
 
   // Basic finger-present thresholds (raw 18-bit)
   static constexpr uint32_t FINGER_IR_MIN  = 20000;
@@ -60,21 +63,21 @@ class MAX30102NativeSensor : public PollingComponent, public i2c::I2CDevice {
 
   // DC tracking for crude perfusion index (AC/DC%)
   static constexpr float DC_ALPHA     = 0.95f;  // EMA baseline
-  static constexpr float PERF_MIN_PCT = 0.10f;  // relaxed (was 0.5)
-  static constexpr float PERF_MAX_PCT = 12.0f;  // relaxed (was 5.0)
+  static constexpr float PERF_MIN_PCT = 0.10f;  // relaxed
+  static constexpr float PERF_MAX_PCT = 12.0f;  // relaxed
 
   // SpO₂ publication guards
-  static constexpr float   SPO2_JUMP_MAX_PCT    = 5.0f;   // widened (was 3.0)
-  static constexpr uint8_t SPO2_SETTLE_WINDOWS  = 2;      // shorter settle (was 5)
+  static constexpr float   SPO2_JUMP_MAX_PCT    = 5.0f;
+  static constexpr uint8_t SPO2_SETTLE_WINDOWS  = 2;
 
   // ---- SpO₂ calibration (simple bias & soft ceiling) ----
-  static constexpr float   SPO2_OFFSET          = -2.0f;  // default −2% (tune to your pulse-ox)
-  static constexpr float   SPO2_MAX_PUBLISH     = 99.0f;  // soft cap so we don't peg at 100
+  static constexpr float   SPO2_OFFSET          = -2.0f;  // tune to your pulse-ox
+  static constexpr float   SPO2_MAX_PUBLISH     = 99.0f;  // avoid pegging at 100
 
   // ---- HR preferences: prefer IBI; optionally publish HR_algo if it agrees tightly ----
-  static constexpr bool    PUBLISH_HR_ALGO         = false; // default OFF (IBI is authoritative)
-  static constexpr uint8_t HR_IBI_MIN_BEATS        = 5;      // need ≥5 valid IBI samples
-  static constexpr float   HR_ALGO_IBI_DIFF_TIGHT  = 12.0f;  // max allowed diff (bpm)
+  static constexpr bool    PUBLISH_HR_ALGO         = false; // default OFF
+  static constexpr uint8_t HR_IBI_MIN_BEATS        = 5;
+  static constexpr float   HR_ALGO_IBI_DIFF_TIGHT  = 12.0f; // bpm
 
   // ---- HR robustness / acceptance gates ----
   // Absolute dt range (ms) for plausible adult HR (24–200 bpm)
@@ -94,8 +97,8 @@ class MAX30102NativeSensor : public PollingComponent, public i2c::I2CDevice {
   static constexpr float LAST_HIGH = 1.35f;
 
   // Auto-resync if we reject a run of consistent beats
-  static constexpr uint8_t REJECT_STREAK_FOR_RESYNC = 4;   // consecutive rejects
-  static constexpr float   REJECT_STREAK_SPREAD_MAX = 1.15f;// (max_dt/min_dt) ≤ 1.15 -> consistent
+  static constexpr uint8_t REJECT_STREAK_FOR_RESYNC = 4;    // consecutive rejects
+  static constexpr float   REJECT_STREAK_SPREAD_MAX = 1.15f; // (max_dt/min_dt) ≤ 1.15
 
   // ---------- State ----------
   // SpO₂ buffers
@@ -108,7 +111,11 @@ class MAX30102NativeSensor : public PollingComponent, public i2c::I2CDevice {
   static constexpr uint8_t RATE_SIZE = 8;
   int32_t  rates_[RATE_SIZE] = {0};  // recent inter-beat intervals (ms)
   uint32_t rate_array_{0};
-  uint32_t last_beat_{0};
+
+  // Sample-clocked beat timing (no millis())
+  uint32_t sample_tick_ms_{0};       // increments +10 ms per IR+RED pair
+  uint32_t last_beat_tick_ms_{0};    // tick at last **accepted** beat
+
   float    last_ibi_bpm_{0.0f};      // set to NaN in setup()
   uint8_t  ibi_valid_beats_{0};      // how many usable IBI samples in the current avg
 
