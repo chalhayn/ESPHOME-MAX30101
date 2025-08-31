@@ -7,7 +7,8 @@
 #include <spo2_algorithm.h>   // Maxim/ProtoCentral SpO2 algorithm
 
 #include <cstring>            // std::memmove
-#include <cmath>              // std::isnan, NAN, std::fabs
+#include <cmath>              // std::isnan, std::fabs
+#include <math.h>             // NAN (ensure macro exists)
 
 namespace esphome {
 namespace max30102_native {
@@ -38,8 +39,9 @@ void MAX30102NativeSensor::setup() {
 
   // Initialize publication state
   this->last_spo2_ = NAN;
-  this->spo2_settle_windows_ = 0;
   this->last_ibi_bpm_ = NAN;
+  this->spo2_settle_windows_ = 0;
+  this->ibi_valid_beats_ = 0;
 
   ESP_LOGCONFIG(TAG, "MAX30102 Native initialized successfully");
 }
@@ -116,7 +118,7 @@ void MAX30102NativeSensor::update() {
 
     // Gentle finger-present gates (skip pair entirely if no contact)
     if (ir_u < FINGER_IR_MIN || red_u < FINGER_RED_MIN) {
-      // Optionally reset settle timer on loss of contact:
+      // Optional: reset settle timer on loss of contact
       // this->spo2_settle_windows_ = 0;
       continue;
     }
@@ -140,10 +142,11 @@ void MAX30102NativeSensor::update() {
           }
           if (count >= 2) {
             float avg_dt = (float) sum_dt / (float) count;   // ms
-            float bpm = 60000.0f / avg_dt;                   // bpm
+            float bpm    = 60000.0f / avg_dt;                // bpm
             if (this->heart_rate_sensor_ && bpm > 40.0f && bpm < 200.0f) {
               this->heart_rate_sensor_->publish_state(bpm);
-              this->last_ibi_bpm_ = bpm;
+              this->last_ibi_bpm_    = bpm;
+              this->ibi_valid_beats_ = count;  // NEW: track usable IBI beats in average
               ESP_LOGD(TAG, "HR (IBI) avg_dt=%.1fms -> bpm=%.1f (n=%u)", avg_dt, bpm, count);
             }
           }
@@ -219,23 +222,21 @@ void MAX30102NativeSensor::update() {
           }
         }
 
-        // ---- Publish HR from algorithm only if near IBI (or no IBI yet) ----
-        if (hr_valid && hr_algo > 40 && hr_algo < 200 && this->heart_rate_sensor_) {
-          bool publish_hr_algo = false;
-          if (std::isnan(this->last_ibi_bpm_)) {
-            // No IBI reference yet; allow early publication
-            publish_hr_algo = true;
-          } else {
+        // ---- Prefer IBI; only publish HR_algo if enabled AND it agrees tightly AFTER IBI ----
+        if (PUBLISH_HR_ALGO && hr_valid && hr_algo > 40 && hr_algo < 200 && this->heart_rate_sensor_) {
+          if (!std::isnan(this->last_ibi_bpm_) && this->ibi_valid_beats_ >= HR_IBI_MIN_BEATS) {
             float diff = std::fabs((float) hr_algo - this->last_ibi_bpm_);
-            publish_hr_algo = (diff <= HR_ALGO_IBI_DIFF_MAX);
-            if (!publish_hr_algo) {
+            if (diff <= HR_ALGO_IBI_DIFF_TIGHT) {
+              this->heart_rate_sensor_->publish_state((float) hr_algo);
+              ESP_LOGD(TAG, "HR algo: %ld bpm (valid=%d, Δ=%.1f to IBI)", (long) hr_algo, (int) hr_valid, diff);
+            } else {
               ESP_LOGD(TAG, "HR algo gated: %ld vs IBI %.1f (Δ=%.1f > %.1f)",
-                       (long) hr_algo, this->last_ibi_bpm_, diff, (double)HR_ALGO_IBI_DIFF_MAX);
+                       (long) hr_algo, this->last_ibi_bpm_, diff, (double)HR_ALGO_IBI_DIFF_TIGHT);
             }
-          }
-          if (publish_hr_algo) {
-            this->heart_rate_sensor_->publish_state((float) hr_algo);
-            ESP_LOGD(TAG, "HR algo: %ld bpm (valid=%d)", (long) hr_algo, (int) hr_valid);
+          } else {
+            // No reliable IBI yet -> do NOT publish HR_algo (prevents early wild spikes)
+            ESP_LOGV(TAG, "HR algo suppressed: IBI not established (beats=%u, last_ibi=%.1f)",
+                     (unsigned)this->ibi_valid_beats_, this->last_ibi_bpm_);
           }
         }
 
@@ -261,7 +262,9 @@ void MAX30102NativeSensor::dump_config() {
   ESP_LOGCONFIG(TAG, "  FIFO avg: 8 samples");
   ESP_LOGCONFIG(TAG, "  SpO2 settle windows: %u", (unsigned) SPO2_SETTLE_WINDOWS);
   ESP_LOGCONFIG(TAG, "  SpO2 step clamp: ±%.1f%%", (double) SPO2_JUMP_MAX_PCT);
-  ESP_LOGCONFIG(TAG, "  HR algo vs IBI max diff: %.1f bpm", (double) HR_ALGO_IBI_DIFF_MAX);
+  ESP_LOGCONFIG(TAG, "  HR algo publish: %s (min IBI beats=%u, tight diff=%.1f bpm)",
+                PUBLISH_HR_ALGO ? "ENABLED" : "DISABLED",
+                (unsigned)HR_IBI_MIN_BEATS, (double)HR_ALGO_IBI_DIFF_TIGHT);
 }
 
 }  // namespace max30102_native
