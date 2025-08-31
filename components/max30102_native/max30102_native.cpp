@@ -7,7 +7,7 @@
 #include <spo2_algorithm.h>   // Maxim/ProtoCentral SpO2 algorithm
 
 #include <cstring>            // std::memmove
-#include <cmath>              // std::isnan, std::fabs
+#include <cmath>              // std::isnan, NAN, std::fabs
 
 namespace esphome {
 namespace max30102_native {
@@ -114,10 +114,9 @@ void MAX30102NativeSensor::update() {
     red_u &= 0x3FFFF;
     ir_u  &= 0x3FFFF;
 
-    // Gentle finger-present gates
+    // Gentle finger-present gates (skip pair entirely if no contact)
     if (ir_u < FINGER_IR_MIN || red_u < FINGER_RED_MIN) {
-      // Reset settle timer if we "lost contact"
-      // (optional — comment out if you don't want this behavior)
+      // Optionally reset settle timer on loss of contact:
       // this->spo2_settle_windows_ = 0;
       continue;
     }
@@ -166,11 +165,15 @@ void MAX30102NativeSensor::update() {
     const bool perf_ok = (pi_ir >= PERF_MIN_PCT && pi_ir <= PERF_MAX_PCT) &&
                          (pi_red >= PERF_MIN_PCT && pi_red <= PERF_MAX_PCT);
 
-    // Decimate 100 Hz -> 25 Hz; only feed SpO₂ buffers when perfusion looks reasonable
+    // Optional verbose line to help debug perfusion:
+    ESP_LOGV(TAG, "PI%% ir=%.2f red=%.2f perf_ok=%d spo2_count=%u",
+             (double)pi_ir, (double)pi_red, perf_ok, (unsigned)this->spo2_count_);
+
+    // Decimate 100 Hz -> 25 Hz; ALWAYS fill the SpO₂ window so the algorithm runs.
     if (++this->decim_count_ >= SPO2_DECIM) {
       this->decim_count_ = 0;
 
-      if (perf_ok && this->spo2_count_ < SPO2_WIN) {
+      if (this->spo2_count_ < SPO2_WIN) {
         this->ir_buf_[this->spo2_count_]  = ir_u;   // uint32_t buffers
         this->red_buf_[this->spo2_count_] = red_u;
         this->spo2_count_++;
@@ -188,28 +191,31 @@ void MAX30102NativeSensor::update() {
           &hr_algo, &hr_valid
         );
 
-        // ---- Publish SpO₂ with stability guards ----
-        if (spo2_valid && spo2 > 70 && spo2 <= 100) {
-          bool settled = (this->spo2_settle_windows_ >= SPO2_SETTLE_WINDOWS);
-          if (!settled) {
-            this->spo2_settle_windows_++;
-            ESP_LOGD(TAG, "SpO2 settle window %u/%u (holding publication)", this->spo2_settle_windows_, SPO2_SETTLE_WINDOWS);
+        // Progress the settle timer once per processed window (even if invalid)
+        bool settled = (this->spo2_settle_windows_ >= SPO2_SETTLE_WINDOWS);
+        if (!settled) {
+          this->spo2_settle_windows_++;
+          ESP_LOGD(TAG, "SpO2 settle window %u/%u (holding publication)",
+                   this->spo2_settle_windows_, (unsigned)SPO2_SETTLE_WINDOWS);
+        }
+
+        // ---- Publish SpO₂ with stability guards (only when settled & plausible) ----
+        if (spo2_valid && spo2 > 70 && spo2 <= 100 && settled) {
+          bool accept = false;
+          if (std::isnan(this->last_spo2_)) {
+            accept = true;
           } else {
-            bool accept = false;
-            if (std::isnan(this->last_spo2_)) {
-              accept = true;
-            } else {
-              float step = std::fabs((float) spo2 - this->last_spo2_);
-              accept = (step <= SPO2_JUMP_MAX_PCT);
-              if (!accept) {
-                ESP_LOGD(TAG, "SpO2 jump filtered: %.1f -> %ld (Δ=%.1f%% > %.1f%%)", this->last_spo2_, (long) spo2, step, SPO2_JUMP_MAX_PCT);
-              }
+            float step = std::fabs((float) spo2 - this->last_spo2_);
+            accept = (step <= SPO2_JUMP_MAX_PCT);
+            if (!accept) {
+              ESP_LOGD(TAG, "SpO2 jump filtered: %.1f -> %ld (Δ=%.1f%% > %.1f%%)",
+                       this->last_spo2_, (long) spo2, step, (double)SPO2_JUMP_MAX_PCT);
             }
-            if (accept && this->spo2_sensor_) {
-              this->spo2_sensor_->publish_state((float) spo2);
-              this->last_spo2_ = (float) spo2;
-              ESP_LOGD(TAG, "SpO2 algo: %ld%% (valid=%d)", (long) spo2, (int) spo2_valid);
-            }
+          }
+          if (accept && this->spo2_sensor_) {
+            this->spo2_sensor_->publish_state((float) spo2);
+            this->last_spo2_ = (float) spo2;
+            ESP_LOGD(TAG, "SpO2 algo: %ld%% (valid=%d)", (long) spo2, (int) spo2_valid);
           }
         }
 
@@ -223,7 +229,8 @@ void MAX30102NativeSensor::update() {
             float diff = std::fabs((float) hr_algo - this->last_ibi_bpm_);
             publish_hr_algo = (diff <= HR_ALGO_IBI_DIFF_MAX);
             if (!publish_hr_algo) {
-              ESP_LOGD(TAG, "HR algo gated: %ld vs IBI %.1f (Δ=%.1f > %.1f)", (long) hr_algo, this->last_ibi_bpm_, diff, HR_ALGO_IBI_DIFF_MAX);
+              ESP_LOGD(TAG, "HR algo gated: %ld vs IBI %.1f (Δ=%.1f > %.1f)",
+                       (long) hr_algo, this->last_ibi_bpm_, diff, (double)HR_ALGO_IBI_DIFF_MAX);
             }
           }
           if (publish_hr_algo) {
