@@ -59,14 +59,19 @@ class MAX30102NativeSensor : public PollingComponent, public i2c::I2CDevice {
   static constexpr uint32_t FINGER_RED_MIN = 10000;
 
   // DC tracking for crude perfusion index (AC/DC%)
-  static constexpr float DC_ALPHA     = 0.95f;  // EMA; larger = slower, smoother baseline
+  static constexpr float DC_ALPHA     = 0.95f;  // EMA baseline
   static constexpr float PERF_MIN_PCT = 0.10f;  // relaxed (was 0.5)
   static constexpr float PERF_MAX_PCT = 12.0f;  // relaxed (was 5.0)
 
   // Publication guards
-  static constexpr float   SPO2_JUMP_MAX_PCT    = 5.0f;  // widened (was 3.0)
-  static constexpr uint8_t SPO2_SETTLE_WINDOWS  = 2;     // shorter settle (was 5)
-  static constexpr float   HR_ALGO_IBI_DIFF_MAX = 25.0f; // bpm max divergence allowed
+  static constexpr float   SPO2_JUMP_MAX_PCT    = 5.0f;   // widened (was 3.0)
+  static constexpr uint8_t SPO2_SETTLE_WINDOWS  = 2;      // shorter settle (was 5)
+  static constexpr float   HR_ALGO_IBI_DIFF_MAX = 25.0f;  // legacy (kept for reference)
+
+  // ---- NEW: prefer IBI; only optionally publish HR_algo if it agrees tightly ----
+  static constexpr bool    PUBLISH_HR_ALGO         = false; // default OFF (IBI is authoritative)
+  static constexpr uint8_t HR_IBI_MIN_BEATS        = 5;      // need ≥5 valid IBI samples
+  static constexpr float   HR_ALGO_IBI_DIFF_TIGHT  = 12.0f;  // max allowed diff (bpm)
 
   // ---------- State ----------
   // SpO₂ buffers
@@ -81,6 +86,7 @@ class MAX30102NativeSensor : public PollingComponent, public i2c::I2CDevice {
   uint32_t rate_array_{0};
   uint32_t last_beat_{0};
   float    last_ibi_bpm_{0.0f};      // set to NaN in setup()
+  uint8_t  ibi_valid_beats_{0};      // how many usable IBI samples in the current avg
 
   // DC baselines for perfusion index
   float dc_ir_{0.0f};
