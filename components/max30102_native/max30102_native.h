@@ -16,89 +16,83 @@ static const uint8_t REG_FIFO_CONFIG  = 0x08;
 static const uint8_t REG_MODE_CONFIG  = 0x09;
 static const uint8_t REG_SPO2_CONFIG  = 0x0A;
 static const uint8_t REG_LED1_PA      = 0x0C;  // RED
-static const uint8_t REG_LED2_PA      = 0x0D;  // IR
+static const uint8_t REG_LED2_PA      = 0xD;   // IR (note: some headers use 0x0D)
 static const uint8_t REG_PART_ID      = 0xFF;
 
 static const uint8_t MAX30102_EXPECTEDPARTID = 0x15;
 
 class MAX30102NativeSensor : public PollingComponent, public i2c::I2CDevice {
  public:
-  // Component lifecycle
   void setup() override;
   void update() override;
   void dump_config() override;
 
-  // Setters wired from codegen
   void set_heart_rate_sensor(sensor::Sensor *s) { heart_rate_sensor_ = s; }
   void set_spo2_sensor(sensor::Sensor *s)      { spo2_sensor_       = s; }
 
  protected:
-  // Internal helpers
   bool initialize_sensor();
   void clear_fifo();
 
-  // Legacy helpers (optional/compat)
+  // Legacy helpers
   uint32_t get_ir();
   uint32_t get_red();
   bool check_for_beat(int32_t sample);
 
-  // Output sensors
+  // Outputs
   sensor::Sensor *heart_rate_sensor_{nullptr};
   sensor::Sensor *spo2_sensor_{nullptr};
 
-  // ---------- Tunables / guards ----------
-  // FIFO averaging: default to 4-sample average for stronger AC (bits 7:5 = 0b010)
+  // ---------- Tunables ----------
+  // FIFO averaging: default 4-sample avg (bits 7:5=0b010) for stronger AC
   static constexpr uint8_t FIFO_CFG_BYTE = 0x50;
 
   // SpO₂ algorithm buffers (expects ~25 Hz, ~100-sample window)
   static constexpr uint16_t SPO2_WIN   = 100;
-  static constexpr uint8_t  SPO2_DECIM = 4;    // 100 Hz -> 25 Hz
-
-  // Sample clock (must match SPO2 sample rate)
+  static constexpr uint8_t  SPO2_DECIM = 4;     // 100 Hz -> 25 Hz
   static constexpr uint32_t SAMPLE_PERIOD_MS = 10; // 100 Hz
 
-  // Basic finger-present thresholds (raw 18-bit)
+  // Finger-present gates (raw 18-bit)
   static constexpr uint32_t FINGER_IR_MIN  = 20000;
   static constexpr uint32_t FINGER_RED_MIN = 10000;
 
-  // DC tracking for crude perfusion index (AC/DC%)
-  static constexpr float DC_ALPHA     = 0.95f;  // EMA baseline
-  static constexpr float PERF_MIN_PCT = 0.10f;  // relaxed
-  static constexpr float PERF_MAX_PCT = 12.0f;  // relaxed
+  // DC tracking for perfusion (AC/DC %)
+  static constexpr float DC_ALPHA     = 0.95f;
+  static constexpr float PERF_MIN_PCT = 0.10f;
+  static constexpr float PERF_MAX_PCT = 12.0f;
 
-  // SpO₂ publication guards
+  // SpO₂ guards
   static constexpr float   SPO2_JUMP_MAX_PCT    = 5.0f;
   static constexpr uint8_t SPO2_SETTLE_WINDOWS  = 2;
+  static constexpr float   SPO2_OFFSET          = -2.0f;
+  static constexpr float   SPO2_MAX_PUBLISH     = 99.0f;
 
-  // ---- SpO₂ calibration (simple bias & soft ceiling) ----
-  static constexpr float   SPO2_OFFSET          = -2.0f;  // tune to your pulse-ox
-  static constexpr float   SPO2_MAX_PUBLISH     = 99.0f;  // avoid pegging at 100
-
-  // ---- HR preferences: prefer IBI; optionally publish HR_algo if it agrees tightly ----
-  static constexpr bool    PUBLISH_HR_ALGO         = false; // default OFF
+  // HR: prefer IBI; HR_algo publish is optional and gated to IBI
+  static constexpr bool    PUBLISH_HR_ALGO         = false;
   static constexpr uint8_t HR_IBI_MIN_BEATS        = 5;
-  static constexpr float   HR_ALGO_IBI_DIFF_TIGHT  = 12.0f; // bpm
+  static constexpr float   HR_ALGO_IBI_DIFF_TIGHT  = 12.0f;
 
-  // ---- HR robustness / acceptance gates ----
-  // Absolute dt range (ms) for plausible adult HR (24–200 bpm)
-  static constexpr uint32_t HR_MIN_DT_MS = 300;   // 200 bpm
-  static constexpr uint32_t HR_MAX_DT_MS = 2500;  // 24 bpm
+  // HR absolute plausibility (24–200 bpm)
+  static constexpr uint32_t HR_MIN_DT_MS = 300;
+  static constexpr uint32_t HR_MAX_DT_MS = 2500;
 
-  // Acquisition phase: wide acceptance vs rolling median (to recover quickly)
+  // Acquisition (wide) vs stable gates
   static constexpr float ACQ_MED_LOW  = 0.45f;
-  static constexpr float ACQ_MED_HIGH = 1.80f;
+  static constexpr float ACQ_MED_HIGH = 2.40f;  // widened so 140→70 bpm can lock (≈×2)
 
-  // Stable phase: median gate (slightly wider than before)
   static constexpr float MED_LOW  = 0.55f;
   static constexpr float MED_HIGH = 1.60f;
 
-  // Stable phase: also gate vs LAST accepted dt (helps median catch up)
   static constexpr float LAST_LOW  = 0.70f;
-  static constexpr float LAST_HIGH = 1.35f;
+  static constexpr float LAST_HIGH = 1.50f;     // a touch wider
 
-  // Auto-resync if we reject a run of consistent beats
-  static constexpr uint8_t REJECT_STREAK_FOR_RESYNC = 4;    // consecutive rejects
-  static constexpr float   REJECT_STREAK_SPREAD_MAX = 1.15f; // (max_dt/min_dt) ≤ 1.15
+  // Auto-resyncs
+  static constexpr uint8_t  REJECT_STREAK_FOR_RESYNC = 4;
+  static constexpr float    REJECT_STREAK_SPREAD_MAX = 1.15f;
+
+  // NEW: timeout rescue & “two-consistent-candidates”
+  static constexpr uint32_t HR_NO_ACCEPT_TIMEOUT_MS  = 3500; // ~3.5 s
+  static constexpr float    HR_CANDIDATE_PAIR_TOL    = 0.20f; // ±20% match → accept
 
   // ---------- State ----------
   // SpO₂ buffers
@@ -107,30 +101,33 @@ class MAX30102NativeSensor : public PollingComponent, public i2c::I2CDevice {
   uint16_t spo2_count_ = 0;
   uint8_t  decim_count_ = 0;
 
-  // Beat timing / smoothing state (IBI → BPM)
+  // Sample clock
+  uint32_t sample_tick_ms_{0};
+
+  // HR state
   static constexpr uint8_t RATE_SIZE = 8;
-  int32_t  rates_[RATE_SIZE] = {0};  // recent inter-beat intervals (ms)
+  int32_t  rates_[RATE_SIZE] = {0};
   uint32_t rate_array_{0};
 
-  // Sample-clocked beat timing (no millis())
-  uint32_t sample_tick_ms_{0};       // increments +10 ms per IR+RED pair
   uint32_t last_beat_tick_ms_{0};    // tick at last **accepted** beat
+  uint32_t last_good_dt_ms_{0};      // last accepted IBI
+  float    last_ibi_bpm_{0.0f};      // NaN in setup
+  uint8_t  ibi_valid_beats_{0};
 
-  float    last_ibi_bpm_{0.0f};      // set to NaN in setup()
-  uint8_t  ibi_valid_beats_{0};      // how many usable IBI samples in the current avg
+  // Reject tracking
+  uint8_t  reject_streak_{0};
+  uint32_t reject_min_dt_{0};
+  uint32_t reject_max_dt_{0};
 
-  // Additional HR acceptance state
-  uint32_t last_good_dt_ms_{0};      // last accepted IBI (ms)
-  uint8_t  reject_streak_{0};        // consecutive rejects
-  uint32_t reject_min_dt_{0};        // min dt observed during current reject streak
-  uint32_t reject_max_dt_{0};        // max dt observed during current reject streak
+  // NEW: candidate-pair rescue
+  uint32_t last_candidate_dt_ms_{0};
 
-  // DC baselines for perfusion index
+  // DC baselines
   float dc_ir_{0.0f};
   float dc_red_{0.0f};
 
   // SpO₂ publication stability
-  float   last_spo2_{0.0f};          // set to NaN in setup()
+  float   last_spo2_{0.0f};   // NaN in setup
   uint8_t spo2_settle_windows_{0};
 };
 
