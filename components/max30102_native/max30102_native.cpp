@@ -62,7 +62,10 @@ void MAX30102NativeSensor::setup() {
   this->spo2_settle_windows_ = 0;
   this->ibi_valid_beats_ = 0;
 
+  this->sample_tick_ms_ = 0;
+  this->last_beat_tick_ms_ = 0;
   this->last_good_dt_ms_ = 0;
+
   this->reject_streak_ = 0;
   this->reject_min_dt_ = std::numeric_limits<uint32_t>::max();
   this->reject_max_dt_ = 0;
@@ -75,7 +78,7 @@ bool MAX30102NativeSensor::initialize_sensor() {
   if (!this->write_byte(REG_MODE_CONFIG, 0x40)) return false;
   delay(100);
 
-  // FIFO config: sample avg=8, rollover=0, fifo_a_full default
+  // FIFO config: sample avg=4 (stronger AC), rollover=0, fifo_a_full default
   if (!this->write_byte(REG_FIFO_CONFIG, FIFO_CFG_BYTE)) return false;
 
   // SpO2 mode (0x03)
@@ -140,6 +143,9 @@ void MAX30102NativeSensor::update() {
     red_u &= 0x3FFFF;
     ir_u  &= 0x3FFFF;
 
+    // Advance synthetic sample clock by one 100 Hz step (per IR+RED pair)
+    this->sample_tick_ms_ += SAMPLE_PERIOD_MS;
+
     // Gentle finger-present gates (skip pair entirely if no contact)
     if (ir_u < FINGER_IR_MIN || red_u < FINGER_RED_MIN) {
       // Optional: reset settle timer on loss of contact
@@ -147,18 +153,19 @@ void MAX30102NativeSensor::update() {
       continue;
     }
 
-    // ---- Heart Rate via SparkFun detector on IR channel (always attempt) ----
+    // ---- Heart Rate via SparkFun detector on IR channel (sample-clocked) ----
     if (checkForBeat((int32_t) ir_u)) {
-      const uint32_t now = millis();
-      if (this->last_beat_ != 0) {
-        const uint32_t dt = now - this->last_beat_;  // inter-beat interval (ms)
-        this->last_beat_ = now; // always resync timing
+      const uint32_t dt = (this->last_beat_tick_ms_ == 0)
+                            ? 0
+                            : (this->sample_tick_ms_ - this->last_beat_tick_ms_);
 
+      // Only evaluate if we have a previous accepted beat
+      if (this->last_beat_tick_ms_ != 0) {
         // Absolute plausibility
         if (dt >= HR_MIN_DT_MS && dt <= HR_MAX_DT_MS) {
           // Rolling median of stored IBIs
           const float med = median_from_ibis(this->rates_, RATE_SIZE);
-          const bool have_med = !std::isnan(med) && med > 0.0f;
+          const bool have_med  = !std::isnan(med) && med > 0.0f;
           const bool have_last = (this->last_good_dt_ms_ > 0);
 
           // Choose gate set: acquisition if few usable beats, else stable gating
@@ -167,7 +174,7 @@ void MAX30102NativeSensor::update() {
           // Check against median
           bool ok_med = false;
           if (have_med) {
-            const float low = (in_acq ? ACQ_MED_LOW : MED_LOW) * med;
+            const float low  = (in_acq ? ACQ_MED_LOW : MED_LOW) * med;
             const float high = (in_acq ? ACQ_MED_HIGH : MED_HIGH) * med;
             ok_med = (dt >= (uint32_t) low && dt <= (uint32_t) high);
           }
@@ -175,7 +182,7 @@ void MAX30102NativeSensor::update() {
           // Check against last accepted dt
           bool ok_last = false;
           if (have_last) {
-            const float low = (in_acq ? ACQ_MED_LOW : LAST_LOW) * (float) this->last_good_dt_ms_;
+            const float low  = (in_acq ? ACQ_MED_LOW : LAST_LOW) * (float) this->last_good_dt_ms_;
             const float high = (in_acq ? ACQ_MED_HIGH : LAST_HIGH) * (float) this->last_good_dt_ms_;
             ok_last = (dt >= (uint32_t) low && dt <= (uint32_t) high);
           }
@@ -190,7 +197,7 @@ void MAX30102NativeSensor::update() {
 
             const bool streak_ready = (this->reject_streak_ >= REJECT_STREAK_FOR_RESYNC);
             const bool consistent = (this->reject_min_dt_ > 0 &&
-                                     (float)this->reject_max_dt_ / (float)this->reject_min_dt_ <= REJECT_STREAK_SPREAD_MAX);
+                     (float)this->reject_max_dt_ / (float)this->reject_min_dt_ <= REJECT_STREAK_SPREAD_MAX);
             if (streak_ready && consistent) {
               accept = true; // reseed with this new rhythm
               ESP_LOGD(TAG, "IBI auto-resync: accepting dt=%lu ms after %u consistent rejects "
@@ -210,8 +217,8 @@ void MAX30102NativeSensor::update() {
             this->rates_[this->rate_array_ % RATE_SIZE] = (int32_t) dt;
             this->rate_array_++;
 
-            // last accepted dt
             this->last_good_dt_ms_ = dt;
+            this->last_beat_tick_ms_ = this->sample_tick_ms_; // accept beat timestamp
 
             uint32_t sum_dt = 0;
             uint8_t count = 0;
@@ -245,11 +252,11 @@ void MAX30102NativeSensor::update() {
                      (int) in_acq);
           }
         } else {
-          // Outside absolute plausibility; keep timing resynced
           ESP_LOGV(TAG, "IBI outside absolute range: dt=%lu ms", (unsigned long) dt);
         }
       } else {
-        this->last_beat_ = now; // initialize
+        // first accepted beat will set timestamp below
+        this->last_beat_tick_ms_ = this->sample_tick_ms_;
       }
     }
 
@@ -361,7 +368,8 @@ void MAX30102NativeSensor::dump_config() {
   LOG_SENSOR("  ", "Heart Rate", this->heart_rate_sensor_);
   LOG_SENSOR("  ", "SpO2", this->spo2_sensor_);
 
-  ESP_LOGCONFIG(TAG, "  FIFO avg: 8 samples");
+  ESP_LOGCONFIG(TAG, "  FIFO avg: %s", FIFO_CFG_BYTE == 0x50 ? "4 samples" : "custom");
+  ESP_LOGCONFIG(TAG, "  Sample clock: %lu ms/step (100 Hz)", (unsigned long)SAMPLE_PERIOD_MS);
   ESP_LOGCONFIG(TAG, "  SpO2 settle windows: %u", (unsigned) SPO2_SETTLE_WINDOWS);
   ESP_LOGCONFIG(TAG, "  SpO2 step clamp: ±%.1f%%, offset: %.1f%%, max publish: %.1f%%",
                 (double)SPO2_JUMP_MAX_PCT, (double)SPO2_OFFSET, (double)SPO2_MAX_PUBLISH);
