@@ -76,9 +76,26 @@ class MAX30102NativeSensor : public PollingComponent, public i2c::I2CDevice {
   static constexpr uint8_t HR_IBI_MIN_BEATS        = 5;      // need ≥5 valid IBI samples
   static constexpr float   HR_ALGO_IBI_DIFF_TIGHT  = 12.0f;  // max allowed diff (bpm)
 
-  // ---- HR robustness: reject IBI outliers vs rolling median ----
-  static constexpr float   IBI_OUTLIER_LOW_FACTOR  = 0.60f;  // reject < 0.60× median
-  static constexpr float   IBI_OUTLIER_HIGH_FACTOR = 1.40f;  // reject > 1.40× median
+  // ---- HR robustness / acceptance gates ----
+  // Absolute dt range (ms) for plausible adult HR (24–200 bpm)
+  static constexpr uint32_t HR_MIN_DT_MS = 300;   // 200 bpm
+  static constexpr uint32_t HR_MAX_DT_MS = 2500;  // 24 bpm
+
+  // Acquisition phase: wide acceptance vs rolling median (to recover quickly)
+  static constexpr float ACQ_MED_LOW  = 0.45f;
+  static constexpr float ACQ_MED_HIGH = 1.80f;
+
+  // Stable phase: median gate (slightly wider than before)
+  static constexpr float MED_LOW  = 0.55f;
+  static constexpr float MED_HIGH = 1.60f;
+
+  // Stable phase: also gate vs LAST accepted dt (helps median catch up)
+  static constexpr float LAST_LOW  = 0.70f;
+  static constexpr float LAST_HIGH = 1.35f;
+
+  // Auto-resync if we reject a run of consistent beats
+  static constexpr uint8_t REJECT_STREAK_FOR_RESYNC = 4;   // consecutive rejects
+  static constexpr float   REJECT_STREAK_SPREAD_MAX = 1.15f;// (max_dt/min_dt) ≤ 1.15 -> consistent
 
   // ---------- State ----------
   // SpO₂ buffers
@@ -94,6 +111,12 @@ class MAX30102NativeSensor : public PollingComponent, public i2c::I2CDevice {
   uint32_t last_beat_{0};
   float    last_ibi_bpm_{0.0f};      // set to NaN in setup()
   uint8_t  ibi_valid_beats_{0};      // how many usable IBI samples in the current avg
+
+  // Additional HR acceptance state
+  uint32_t last_good_dt_ms_{0};      // last accepted IBI (ms)
+  uint8_t  reject_streak_{0};        // consecutive rejects
+  uint32_t reject_min_dt_{0};        // min dt observed during current reject streak
+  uint32_t reject_max_dt_{0};        // max dt observed during current reject streak
 
   // DC baselines for perfusion index
   float dc_ir_{0.0f};
