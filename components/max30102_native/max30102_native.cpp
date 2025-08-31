@@ -9,6 +9,7 @@
 #include <cstring>            // std::memmove
 #include <cmath>              // std::isnan, std::fabs
 #include <algorithm>          // std::sort
+#include <limits>             // std::numeric_limits
 #include <math.h>             // NAN (ensure macro exists)
 
 namespace esphome {
@@ -60,6 +61,11 @@ void MAX30102NativeSensor::setup() {
   this->last_ibi_bpm_ = NAN;
   this->spo2_settle_windows_ = 0;
   this->ibi_valid_beats_ = 0;
+
+  this->last_good_dt_ms_ = 0;
+  this->reject_streak_ = 0;
+  this->reject_min_dt_ = std::numeric_limits<uint32_t>::max();
+  this->reject_max_dt_ = 0;
 
   ESP_LOGCONFIG(TAG, "MAX30102 Native initialized successfully");
 }
@@ -143,48 +149,104 @@ void MAX30102NativeSensor::update() {
 
     // ---- Heart Rate via SparkFun detector on IR channel (always attempt) ----
     if (checkForBeat((int32_t) ir_u)) {
-      uint32_t now = millis();
+      const uint32_t now = millis();
       if (this->last_beat_ != 0) {
-        uint32_t dt = now - this->last_beat_;  // inter-beat interval (ms)
+        const uint32_t dt = now - this->last_beat_;  // inter-beat interval (ms)
+        this->last_beat_ = now; // always resync timing
 
-        // Robust IBI outlier rejection vs rolling median
-        float med = median_from_ibis(this->rates_, RATE_SIZE); // ms
-        bool reject = false;
-        if (!std::isnan(med) && med > 0.0f) {
-          float lo = med * IBI_OUTLIER_LOW_FACTOR;
-          float hi = med * IBI_OUTLIER_HIGH_FACTOR;
-          if (dt < (uint32_t) lo || dt > (uint32_t) hi) {
-            reject = true;
-            ESP_LOGD(TAG, "IBI outlier rejected: dt=%lu ms (median=%.1f, range=%.1f..%.1f ms)",
-                     (unsigned long) dt, (double) med, (double) lo, (double) hi);
+        // Absolute plausibility
+        if (dt >= HR_MIN_DT_MS && dt <= HR_MAX_DT_MS) {
+          // Rolling median of stored IBIs
+          const float med = median_from_ibis(this->rates_, RATE_SIZE);
+          const bool have_med = !std::isnan(med) && med > 0.0f;
+          const bool have_last = (this->last_good_dt_ms_ > 0);
+
+          // Choose gate set: acquisition if few usable beats, else stable gating
+          const bool in_acq = (this->ibi_valid_beats_ < HR_IBI_MIN_BEATS);
+
+          // Check against median
+          bool ok_med = false;
+          if (have_med) {
+            const float low = (in_acq ? ACQ_MED_LOW : MED_LOW) * med;
+            const float high = (in_acq ? ACQ_MED_HIGH : MED_HIGH) * med;
+            ok_med = (dt >= (uint32_t) low && dt <= (uint32_t) high);
           }
-        }
 
-        // Always resync last_beat_ to maintain timing, even if rejecting this dt
-        this->last_beat_ = now;
-
-        if (!reject && dt > 300 && dt < 3000) {  // ~20–200 BPM
-          // Store IBI (ms) into ring buffer
-          this->rates_[this->rate_array_ % RATE_SIZE] = (int32_t) dt;
-          this->rate_array_++;
-
-          // Compute BPM from mean IBI (smoother)
-          uint32_t sum_dt = 0;
-          uint8_t count = 0;
-          for (uint8_t k = 0; k < RATE_SIZE; k++) {
-            int32_t ibi = this->rates_[k];
-            if (ibi > 0) { sum_dt += (uint32_t) ibi; count++; }
+          // Check against last accepted dt
+          bool ok_last = false;
+          if (have_last) {
+            const float low = (in_acq ? ACQ_MED_LOW : LAST_LOW) * (float) this->last_good_dt_ms_;
+            const float high = (in_acq ? ACQ_MED_HIGH : LAST_HIGH) * (float) this->last_good_dt_ms_;
+            ok_last = (dt >= (uint32_t) low && dt <= (uint32_t) high);
           }
-          if (count >= 2) {
-            float avg_dt = (float) sum_dt / (float) count;   // ms
-            float bpm    = 60000.0f / avg_dt;                // bpm
-            if (this->heart_rate_sensor_ && bpm > 40.0f && bpm < 200.0f) {
-              this->heart_rate_sensor_->publish_state(bpm);
-              this->last_ibi_bpm_    = bpm;
-              this->ibi_valid_beats_ = count;  // track usable IBI beats in average
-              ESP_LOGD(TAG, "HR (IBI) avg_dt=%.1fms -> bpm=%.1f (n=%u)", avg_dt, bpm, count);
+
+          bool accept = (!have_med && !have_last) || ok_med || ok_last;
+
+          // If still rejecting repeatedly but dt looks consistent, allow auto-resync
+          if (!accept) {
+            this->reject_streak_++;
+            this->reject_min_dt_ = std::min(this->reject_min_dt_, dt);
+            this->reject_max_dt_ = std::max(this->reject_max_dt_, dt);
+
+            const bool streak_ready = (this->reject_streak_ >= REJECT_STREAK_FOR_RESYNC);
+            const bool consistent = (this->reject_min_dt_ > 0 &&
+                                     (float)this->reject_max_dt_ / (float)this->reject_min_dt_ <= REJECT_STREAK_SPREAD_MAX);
+            if (streak_ready && consistent) {
+              accept = true; // reseed with this new rhythm
+              ESP_LOGD(TAG, "IBI auto-resync: accepting dt=%lu ms after %u consistent rejects "
+                            "(range %lu..%lu ms)",
+                       (unsigned long) dt, (unsigned) this->reject_streak_,
+                       (unsigned long) this->reject_min_dt_, (unsigned long) this->reject_max_dt_);
             }
+          } else {
+            // reset reject streak on acceptance path
+            this->reject_streak_ = 0;
+            this->reject_min_dt_ = std::numeric_limits<uint32_t>::max();
+            this->reject_max_dt_ = 0;
           }
+
+          if (accept) {
+            // Store IBI and compute BPM from mean IBI (smoother)
+            this->rates_[this->rate_array_ % RATE_SIZE] = (int32_t) dt;
+            this->rate_array_++;
+
+            // last accepted dt
+            this->last_good_dt_ms_ = dt;
+
+            uint32_t sum_dt = 0;
+            uint8_t count = 0;
+            for (uint8_t k = 0; k < RATE_SIZE; k++) {
+              int32_t ibi = this->rates_[k];
+              if (ibi > 0) { sum_dt += (uint32_t) ibi; count++; }
+            }
+            if (count >= 2) {
+              float avg_dt = (float) sum_dt / (float) count;   // ms
+              float bpm    = 60000.0f / avg_dt;                // bpm
+              if (this->heart_rate_sensor_ && bpm > 40.0f && bpm < 200.0f) {
+                this->heart_rate_sensor_->publish_state(bpm);
+                this->last_ibi_bpm_    = bpm;
+                this->ibi_valid_beats_ = count;
+                ESP_LOGD(TAG, "HR (IBI) avg_dt=%.1fms -> bpm=%.1f (n=%u)", avg_dt, bpm, count);
+              }
+            }
+          } else {
+            // log rejection with ranges
+            const float med_use = have_med ? med : 0.0f;
+            const float lmed = (in_acq ? ACQ_MED_LOW : MED_LOW) * med_use;
+            const float hmed = (in_acq ? ACQ_MED_HIGH : MED_HIGH) * med_use;
+            const float llast = (in_acq ? ACQ_MED_LOW : LAST_LOW) * (float)this->last_good_dt_ms_;
+            const float hlast = (in_acq ? ACQ_MED_HIGH : LAST_HIGH) * (float)this->last_good_dt_ms_;
+            ESP_LOGD(TAG, "IBI rejected: dt=%lu ms (med=%.1f, med_range=%.1f..%.1f ms, "
+                          "last=%lu ms, last_range=%.1f..%.1f ms, acq=%d)",
+                     (unsigned long) dt, (double) med_use,
+                     (double) lmed, (double) hmed,
+                     (unsigned long) this->last_good_dt_ms_,
+                     (double) llast, (double) hlast,
+                     (int) in_acq);
+          }
+        } else {
+          // Outside absolute plausibility; keep timing resynced
+          ESP_LOGV(TAG, "IBI outside absolute range: dt=%lu ms", (unsigned long) dt);
         }
       } else {
         this->last_beat_ = now; // initialize
@@ -306,8 +368,13 @@ void MAX30102NativeSensor::dump_config() {
   ESP_LOGCONFIG(TAG, "  HR algo publish: %s (min IBI beats=%u, tight diff=%.1f bpm)",
                 PUBLISH_HR_ALGO ? "ENABLED" : "DISABLED",
                 (unsigned)HR_IBI_MIN_BEATS, (double)HR_ALGO_IBI_DIFF_TIGHT);
-  ESP_LOGCONFIG(TAG, "  IBI outlier gate: [%.2fx .. %.2fx] of rolling median",
-                (double)IBI_OUTLIER_LOW_FACTOR, (double)IBI_OUTLIER_HIGH_FACTOR);
+  ESP_LOGCONFIG(TAG, "  HR IBI acceptance: abs=[%ums..%ums], acq_med=[%.2fx..%.2fx], "
+                     "med=[%.2fx..%.2fx], last=[%.2fx..%.2fx], resync after %u rejects (spread≤%.2fx)",
+                (unsigned)HR_MIN_DT_MS, (unsigned)HR_MAX_DT_MS,
+                (double)ACQ_MED_LOW, (double)ACQ_MED_HIGH,
+                (double)MED_LOW, (double)MED_HIGH,
+                (double)LAST_LOW, (double)LAST_HIGH,
+                (unsigned)REJECT_STREAK_FOR_RESYNC, (double)REJECT_STREAK_SPREAD_MAX);
 }
 
 }  // namespace max30102_native
