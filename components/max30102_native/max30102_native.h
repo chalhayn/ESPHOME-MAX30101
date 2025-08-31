@@ -46,20 +46,49 @@ class MAX30102NativeSensor : public PollingComponent, public i2c::I2CDevice {
   sensor::Sensor *heart_rate_sensor_{nullptr};
   sensor::Sensor *spo2_sensor_{nullptr};
 
+  // ---------- Tunables / guards ----------
+  // FIFO averaging: use 8-sample average to reduce noise (bits 7:5 = 0b011)
+  static constexpr uint8_t FIFO_CFG_BYTE = 0x60;
+
   // SpO₂ algorithm buffers (expects ~25 Hz, ~100-sample window)
   static constexpr uint16_t SPO2_WIN   = 100;
   static constexpr uint8_t  SPO2_DECIM = 4;    // 100 Hz -> 25 Hz
 
+  // Basic finger-present thresholds (raw 18-bit)
+  static constexpr uint32_t FINGER_IR_MIN  = 20000;
+  static constexpr uint32_t FINGER_RED_MIN = 10000;
+
+  // DC tracking for crude perfusion index (AC/DC%)
+  static constexpr float DC_ALPHA   = 0.95f;  // EMA; larger = slower, smoother baseline
+  static constexpr float PERF_MIN_PCT = 0.5f; // accept if 0.5% ≤ PI ≤ 5%
+  static constexpr float PERF_MAX_PCT = 5.0f;
+
+  // Publication guards
+  static constexpr float SPO2_JUMP_MAX_PCT = 3.0f;  // clamp ±3% steps
+  static constexpr uint8_t SPO2_SETTLE_WINDOWS = 5; // ignore first ~10s (5 windows x 2s slide)
+  static constexpr float HR_ALGO_IBI_DIFF_MAX = 25.0f; // bpm max divergence allowed
+
+  // ---------- State ----------
+  // SpO₂ buffers
   uint32_t ir_buf_[SPO2_WIN]  = {0};
   uint32_t red_buf_[SPO2_WIN] = {0};
   uint16_t spo2_count_ = 0;
   uint8_t  decim_count_ = 0;
 
-  // Beat timing / smoothing state
+  // Beat timing / smoothing state (IBI → BPM)
   static constexpr uint8_t RATE_SIZE = 8;
   int32_t  rates_[RATE_SIZE] = {0};  // recent inter-beat intervals (ms)
   uint32_t rate_array_{0};
   uint32_t last_beat_{0};
+  float    last_ibi_bpm_{NAN};       // last published IBI BPM (for gating HR_algo)
+
+  // DC baselines for perfusion index
+  float dc_ir_{0.0f};
+  float dc_red_{0.0f};
+
+  // SpO₂ publication stability
+  float   last_spo2_{NAN};
+  uint8_t spo2_settle_windows_{0};
 };
 
 }  // namespace max30102_native
